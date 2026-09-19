@@ -1,7 +1,7 @@
-intersection_id,north_traffic,south_traffic,east_traffic,west_traffic,vehicle_density,queue_length,road_capacity,current_signal,waiting_time,emergency_active,is_emergency_route
-J1,21,35,33,28,0.292,6,400,EW_GREEN,20.5,False,False
-J2,24,21,30,39,0.285,8,400,EW_GREEN,21.8,False,False
-J3,30,22,36,29,0.292,6,400,NS_GREEN,23.9,False,False
-J4,35,32,28,36,0.328,6,400,NS_GREEN,13.4,False,False
-J5,21,31,37,21,0.275,9,400,EW_GREEN,19.5,False,False
-J6,23,35,34,27,0.297,3,400,EW_GREEN,23.4,False,False
+intersection_id,current_signal,vehicle_density,queue_length,waiting_time,north_traffic,south_traffic,east_traffic,west_traffic,total_traffic,road_capacity,throughput,speed_kmh,congestion_level,fuel_consumption,co2_emission,blocked,accident_severity,emergency_active,is_emergency_route,emergency_current,emergency_next,emergency_priority
+J1,NS_GREEN,0.2333,14.0,40.39,48,43,25,33,149,400,306.67,35.95,MEDIUM,1.524,3.52,False,0.0,False,False,False,False,NORMAL
+J2,EW_GREEN,0.1667,10.0,39.82,41,38,58,34,171,400,333.33,35.84,MEDIUM,1.198,2.768,False,0.0,False,False,False,False,NORMAL
+J3,NS_GREEN,0.15,9.0,35.84,30,18,36,30,114,400,340.0,39.18,LOW,1.078,2.491,False,0.0,False,False,False,False,NORMAL
+J4,EW_GREEN,0.1167,7.0,18.59,47,44,27,25,143,400,353.33,40.04,LOW,0.746,1.723,False,0.0,False,False,False,False,NORMAL
+J5,NS_GREEN,0.1,6.0,26.26,31,36,23,15,105,400,360.0,42.0,LOW,0.743,1.715,False,0.0,False,False,False,False,NORMAL
+J6,EW_GREEN,0.1,6.0,34.46,24,19,28,27,98,400,360.0,41.65,LOW,0.825,1.905,False,0.0,False,False,False,False,NORMAL

@@ -1,411 +1,2162 @@
-import streamlit as st
-import pandas as pd
+"""
+Quantum Traffic Optimization
+Integrated Streamlit Application
+
+Architecture:
+
+LIVE MODE
+Camera / Video
+      ↓
+FastAPI Vision Backend :8000
+      ↓
+YOLO + Tracking
+      ↓
+WebSocket /ws/traffic
+      ↓
+Telemetry Adapter
+      ↓
+Traffic Analytics
+      ↓
+QUBO
+      ↓
+QAOA / Classical Fallback
+      ↓
+Emergency / Accident / Routing
+      ↓
+Performance Dashboard
+
+SIMULATION MODE
+Traffic Simulation
+      ↓
+Traffic Analytics
+      ↓
+QUBO
+      ↓
+QAOA
+      ↓
+Emergency / Routing / Metrics
+"""
+
+import sys
+import json
+import base64
+import threading
+from pathlib import Path
+from typing import Optional
+
+import requests
 import numpy as np
-import networkx as nx
-import matplotlib.pyplot as plt
+import pandas as pd
+import streamlit as st
 
-# Import project modules
-from simulation.traffic_simulation import generate_traffic
-from optimization.qaoa import optimize_signals
-from emergency.emergency_corridor import create_emergency_corridor, restore_normal_signals
-from metrics.performance import calculate_metrics, calculate_classical_baseline, compare_performance
+# Optional WebSocket dependency
+try:
+    import websocket
+    WEBSOCKET_AVAILABLE = True
+except ImportError:
+    WEBSOCKET_AVAILABLE = False
 
-# Page Configuration
+
+# ============================================================
+# PROJECT PATH
+# ============================================================
+
+ROOT_DIR = Path(__file__).resolve().parent
+
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+
+# ============================================================
+# BACKEND CONFIGURATION
+# ============================================================
+
+BACKEND_URL = "http://127.0.0.1:8000"
+WS_URL = "ws://127.0.0.1:8000/ws/traffic"
+
+
+# ============================================================
+# BACKEND REST CLIENT
+# ============================================================
+
+def backend_get(endpoint: str, timeout: int = 10):
+    """GET request to FastAPI backend."""
+    try:
+        response = requests.get(
+            f"{BACKEND_URL}{endpoint}",
+            timeout=timeout
+        )
+        response.raise_for_status()
+        return response.json()
+
+    except requests.exceptions.ConnectionError:
+        return None
+
+    except requests.exceptions.Timeout:
+        return None
+
+    except requests.exceptions.RequestException:
+        return None
+
+
+def backend_post(
+    endpoint: str,
+    payload=None,
+    timeout: int = 60
+):
+    """POST request to FastAPI backend."""
+    try:
+        response = requests.post(
+            f"{BACKEND_URL}{endpoint}",
+            json=payload or {},
+            timeout=timeout
+        )
+
+        response.raise_for_status()
+        return response.json()
+
+    except requests.exceptions.RequestException as e:
+        st.error(f"Backend error: {e}")
+        return None
+
+
+# ============================================================
+# BACKEND STATUS
+# ============================================================
+
+def backend_online():
+    """Check whether FastAPI backend is available."""
+    return backend_get("/api/status") is not None
+
+
+# ============================================================
+# WEBSOCKET LIVE CLIENT
+# ============================================================
+
+def receive_live_frame(timeout=5):
+    """
+    Receive one frame + telemetry packet from FastAPI WebSocket.
+    """
+
+    if not WEBSOCKET_AVAILABLE:
+        return None
+
+    try:
+        ws = websocket.create_connection(
+            WS_URL,
+            timeout=timeout
+        )
+
+        raw = ws.recv()
+
+        ws.close()
+
+        if not raw:
+            return None
+
+        return json.loads(raw)
+
+    except Exception:
+        return None
+
+
+# ============================================================
+# IMPORT PROJECT MODULES
+# ============================================================
+
+from simulation.traffic_simulation import (
+    generate_traffic,
+    apply_optimization,
+    save_simulation,
+    INTERSECTIONS,
+)
+
+from optimization.qaoa import (
+    optimize_signals,
+    get_solver_metadata,
+)
+
+from optimization.qubo import (
+    create_qubo,
+)
+
+from emergency.emergency_corridor import (
+    EmergencyVehicle,
+    EmergencyCorridor,
+)
+
+from emergency.accident_detector import (
+    AccidentDetector,
+)
+
+from emergency.emergency_detector import (
+    EmergencyVehicleDetector,
+)
+
+from metrics.performance import (
+    calculate_metrics,
+    compare_metrics,
+    intersection_metrics,
+)
+
+from traffic.density import (
+    compute_density_for_dataframe,
+)
+
+from traffic.congestion import (
+    compute_congestion_for_dataframe,
+)
+
+from traffic.queue import (
+    detect_queue_from_dataframe,
+    aggregate_queue_metrics,
+)
+
+from routing.route_optimizer import (
+    RouteOptimizer,
+)
+
+from visualization.map_view import (
+    create_traffic_map,
+)
+
+from visualization.charts import (
+    create_comparison_chart,
+    create_queue_chart,
+    create_signal_timing_chart,
+    create_improvement_chart,
+    create_density_gauge,
+)
+
+
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
+
 st.set_page_config(
-    page_title="Quantum Urban Traffic Optimization",
+    page_title="Quantum Traffic Optimization",
     page_icon="🚦",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Custom Styling for Professional Hackathon UI (Clean Light Theme)
-st.markdown("""
-<style>
+
+# ============================================================
+# CSS
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+
     .main-title {
-        font-size: 2.2rem;
-        font-weight: 800;
-        color: #1c7ed6;
-        margin-bottom: 0.1rem;
-    }
-    .sub-title {
-        font-size: 1.1rem;
-        color: #495057;
-        margin-bottom: 1.2rem;
-    }
-    .status-card {
-        background-color: #ffffff;
-        border-radius: 8px;
-        padding: 12px 16px;
-        border-left: 4px solid #1c7ed6;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-        margin-bottom: 1rem;
-    }
-    .emergency-card {
-        background-color: #e7f5ff;
-        border-radius: 8px;
-        padding: 16px;
-        border: 1px solid #a5d8ff;
-        border-left: 5px solid #1098ad;
-        margin-bottom: 1.5rem;
-    }
-    .priority-badge {
-        background-color: #2b8a3e;
-        color: #ffffff;
-        padding: 6px 12px;
-        border-radius: 20px;
+        font-size: 38px;
         font-weight: 700;
-        display: inline-block;
-        margin-right: 8px;
+        margin-bottom: 5px;
     }
-</style>
-""", unsafe_allow_html=True)
 
-# Main Application Header
-st.markdown('<div class="main-title">Quantum-Enhanced Adaptive Urban Traffic Optimization</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Hybrid Quantum-Classical Traffic Signal Optimization for Smart Cities</div>', unsafe_allow_html=True)
+    .subtitle {
+        font-size: 17px;
+        opacity: 0.75;
+        margin-bottom: 25px;
+    }
 
-# Sidebar Configuration
-st.sidebar.header("🕹️ Simulation Controls")
+    .backend-online {
+        padding: 10px;
+        border-radius: 10px;
+        border: 1px solid #21c55d;
+        background: rgba(33,197,93,0.08);
+    }
 
-scenarios = [
-    "Normal Traffic",
-    "Heavy Congestion",
-    "Accident / Road Closure",
-    "Emergency Vehicle"
-]
+    .backend-offline {
+        padding: 10px;
+        border-radius: 10px;
+        border: 1px solid #ef4444;
+        background: rgba(239,68,68,0.08);
+    }
 
-selected_scenario = st.sidebar.selectbox(
-    "Select Traffic Scenario",
-    scenarios,
-    index=0
+    .emergency-box {
+        padding: 18px;
+        border-radius: 12px;
+        border: 2px solid #ff4b4b;
+        background-color: rgba(255, 75, 75, 0.08);
+        margin-bottom: 20px;
+    }
+
+    .success-box {
+        padding: 18px;
+        border-radius: 12px;
+        border: 2px solid #21c55d;
+        background-color: rgba(33, 197, 93, 0.08);
+    }
+
+    .solver-box {
+        padding: 15px;
+        border-radius: 12px;
+        border: 2px solid #6366f1;
+        background-color: rgba(99, 102, 241, 0.08);
+        margin-bottom: 15px;
+    }
+
+    .accident-box {
+        padding: 15px;
+        border-radius: 12px;
+        border: 2px solid #f59e0b;
+        background-color: rgba(245, 158, 11, 0.08);
+        margin-bottom: 15px;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-run_button = st.sidebar.button("🚀 Run Optimization", type="primary", use_container_width=True)
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("""
-**Hackathon Architecture**:
-- **Simulation**: 6 Interconnected Intersections
-- **QUBO**: Pressure & Interaction Matrix Formulation
-- **QAOA / Hybrid**: 64-State Energy Minimization
-- **Emergency**: Dynamic Green Corridor
-- **Metrics**: Delay, Queue, Throughput, Fuel & CO2
-""")
+# ============================================================
+# SESSION STATE
+# ============================================================
 
-# Initialize Session State for Emergency Corridor Toggle
-if "emergency_restored" not in st.session_state:
-    st.session_state["emergency_restored"] = False
-if "last_scenario" not in st.session_state:
-    st.session_state["last_scenario"] = selected_scenario
+defaults = {
+    "traffic_data": None,
+    "optimized_data": None,
+    "optimization_result": None,
+    "scenario": "Normal Traffic",
+    "emergency_vehicle": None,
+    "solver_metadata": None,
+    "live_packet": None,
+    "live_frame": None,
+    "live_telemetry": None,
+    "live_dataframe": None,
+    "backend_status": None,
+    "live_mode": False,
+    "camera_started": False,
+    "uploaded_video": False,
+}
 
-# Reset emergency restoration toggle if scenario changes
-if st.session_state["last_scenario"] != selected_scenario:
-    st.session_state["emergency_restored"] = False
-    st.session_state["last_scenario"] = selected_scenario
+for key, value in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
-# Core Execution Pipeline
-try:
-    traffic_data = generate_traffic(selected_scenario)
-    optimized_signals = optimize_signals(traffic_data)
 
-    classical_metrics = calculate_classical_baseline(traffic_data)
-    optimized_metrics = calculate_metrics(traffic_data, optimized_signals)
-    comparison = compare_performance(classical_metrics, optimized_metrics)
+# ============================================================
+# HEADER
+# ============================================================
 
-    # Standard Emergency Route
-    emergency_route = ["J1", "J2", "J3", "J5"]
+st.markdown(
+    '<div class="main-title">🚦 Quantum Traffic Optimization</div>',
+    unsafe_allow_html=True,
+)
 
-    if selected_scenario == "Emergency Vehicle":
-        if not st.session_state.get("emergency_restored", False):
-            display_signals = create_emergency_corridor(emergency_route, optimized_signals)
-        else:
-            display_signals = restore_normal_signals(optimized_signals)
-    else:
-        display_signals = optimized_signals.copy()
-        if "signal_status" not in display_signals.columns:
-            display_signals["signal_status"] = "NORMAL"
-        if "emergency_priority" not in display_signals.columns:
-            display_signals["emergency_priority"] = False
-
-except Exception as e:
-    st.error(f"Execution Error: {str(e)}")
-    st.info("Using documented hybrid classical QUBO solver.")
-
-# PART 6 — SCENARIO SUMMARY (STATUS CARDS AT TOP)
-s_col1, s_col2, s_col3, s_col4 = st.columns(4)
-
-with s_col1:
-    st.markdown(f"""
-    <div class="status-card">
-        <small style="color: #6c757d;">CURRENT SCENARIO</small><br>
-        <strong style="font-size: 1.1rem; color: #1c7ed6;">{selected_scenario}</strong>
+st.markdown(
+    """
+    <div class="subtitle">
+    Real-Time Vision + Traffic Intelligence + QUBO + QAOA +
+    Emergency Priority + Route Optimization
     </div>
-    """, unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
-with s_col2:
-    st.markdown("""
-    <div class="status-card">
-        <small style="color: #6c757d;">NETWORK CAPACITY</small><br>
-        <strong style="font-size: 1.1rem; color: #212529;">6 Active Intersections (J1-J6)</strong>
-    </div>
-    """, unsafe_allow_html=True)
 
-with s_col3:
-    st.markdown("""
-    <div class="status-card">
-        <small style="color: #6c757d;">OPTIMIZATION STATUS</small><br>
-        <strong style="font-size: 1.1rem; color: #2b8a3e;">QAOA / Hybrid Solved</strong>
-    </div>
-    """, unsafe_allow_html=True)
+# ============================================================
+# BACKEND STATUS
+# ============================================================
 
-with s_col4:
-    emerg_status_text = "ACTIVE Corridor" if (selected_scenario == "Emergency Vehicle" and not st.session_state.get("emergency_restored", False)) else "Inactive"
-    emerg_status_color = "#1098ad" if (selected_scenario == "Emergency Vehicle" and not st.session_state.get("emergency_restored", False)) else "#6c757d"
-    st.markdown(f"""
-    <div class="status-card">
-        <small style="color: #6c757d;">EMERGENCY CORRIDOR</small><br>
-        <strong style="font-size: 1.1rem; color: {emerg_status_color};">{emerg_status_text}</strong>
-    </div>
-    """, unsafe_allow_html=True)
+status = backend_get("/api/status")
 
-# PART 2 — EMERGENCY GREEN CORRIDOR SECTION
-if selected_scenario == "Emergency Vehicle":
-    st.markdown("### 🚑 EMERGENCY GREEN CORRIDOR")
+if status:
 
-    is_restored = st.session_state.get("emergency_restored", False)
-
-    if not is_restored:
-        st.markdown(f"""
-        <div class="emergency-card">
-            <h4 style="margin:0; color: #0b7285;">Emergency Vehicle: ACTIVE</h4>
-            <p style="margin-top: 4px; font-size: 1.05rem; color: #212529;">
-                <strong>Emergency Route:</strong> <span style="color: #1098ad; font-weight: 700;">J1 → J2 → J3 → J5</span>
-            </p>
-            <p style="margin: 0; color: #2b8a3e; font-weight: 600;">
-                ✅ Temporary green corridor activated. Estimated corridor travel time: <strong>2.8 minutes</strong> (Priority green clearance applied).
-            </p>
+    st.markdown(
+        """
+        <div class="backend-online">
+        🟢 <b>Vision Backend Connected</b>
         </div>
-        """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
-        e_cols = st.columns(4)
-        for i, node in enumerate(emergency_route):
-            with e_cols[i]:
-                st.markdown(f"**{node}** → 🟢 **EMERGENCY PRIORITY**")
+else:
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("🔄 Restore Normal Signals", key="restore_btn"):
-            st.session_state["emergency_restored"] = True
-            st.rerun()
+    st.markdown(
+        """
+        <div class="backend-offline">
+        🔴 <b>Vision Backend Offline</b>
+        <br>
+        Start:
+        <code>python -m vision.backend.main</code>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.title("⚙️ Control Center")
+
+mode = st.sidebar.radio(
+    "Data Source",
+    [
+        "Live Vision",
+        "Traffic Simulation",
+    ],
+)
+
+scenario = st.sidebar.selectbox(
+    "Traffic Scenario",
+    [
+        "Normal Traffic",
+        "Heavy Congestion",
+        "Accident / Road Closure",
+        "Emergency Vehicle",
+    ],
+)
+
+seed = st.sidebar.number_input(
+    "Simulation Seed",
+    min_value=0,
+    max_value=999999,
+    value=42,
+    step=1,
+)
+
+
+# ============================================================
+# LIVE VISION CONTROLS
+# ============================================================
+
+if mode == "Live Vision":
+
+    st.sidebar.divider()
+    st.sidebar.subheader("📹 Vision Control")
+
+    start_camera_button = st.sidebar.button(
+        "▶️ Start Camera",
+        use_container_width=True,
+    )
+
+    stop_camera_button = st.sidebar.button(
+        "⏹ Stop Camera",
+        use_container_width=True,
+    )
+
+    reset_camera_button = st.sidebar.button(
+        "🔄 Reset Counters",
+        use_container_width=True,
+    )
+
+    if start_camera_button:
+
+        result = backend_post(
+            "/api/camera/start"
+        )
+
+        if result:
+
+            st.session_state.camera_started = True
+            st.session_state.live_mode = True
+
+            st.sidebar.success(
+                "Camera connected."
+            )
+
+    if stop_camera_button:
+
+        result = backend_post(
+            "/api/camera/stop"
+        )
+
+        if result:
+
+            st.session_state.camera_started = False
+            st.session_state.live_mode = False
+
+            st.sidebar.success(
+                "Camera stopped."
+            )
+
+    if reset_camera_button:
+
+        result = backend_post(
+            "/api/reset"
+        )
+
+        if result:
+
+            st.sidebar.success(
+                "Counters reset."
+            )
+
+
+# ============================================================
+# SIMULATION CONTROLS
+# ============================================================
+
+run_button = st.sidebar.button(
+    "🚀 Run Optimization",
+    use_container_width=True,
+)
+
+generate_button = st.sidebar.button(
+    "🔄 Generate Traffic",
+    use_container_width=True,
+)
+
+
+# ============================================================
+# ROUTE CONTROL
+# ============================================================
+
+st.sidebar.divider()
+
+st.sidebar.subheader("🛣️ Route Optimizer")
+
+route_source = st.sidebar.selectbox(
+    "Route Source",
+    INTERSECTIONS,
+    index=0,
+)
+
+route_target = st.sidebar.selectbox(
+    "Route Target",
+    INTERSECTIONS,
+    index=len(INTERSECTIONS) - 1,
+)
+
+
+# ============================================================
+# LIVE TELEMETRY → DATAFRAME
+# ============================================================
+
+def telemetry_to_dataframe(telemetry):
+    """
+    Convert real-time vision telemetry into the traffic
+    DataFrame expected by the optimization modules.
+    """
+
+    if not telemetry:
+        return None
+
+    # --------------------------------------------------------
+    # Extract possible vehicle counts
+    # --------------------------------------------------------
+
+    total_vehicles = (
+        telemetry.get("active_count")
+        or telemetry.get("vehicle_count")
+        or telemetry.get("total_vehicles")
+        or telemetry.get("count")
+        or 0
+    )
+
+    unique_vehicles = (
+        telemetry.get("unique_count")
+        or telemetry.get("unique_vehicles")
+        or telemetry.get("unique_vehicle_count")
+        or total_vehicles
+    )
+
+    # --------------------------------------------------------
+    # Handle intersection-level telemetry
+    # --------------------------------------------------------
+
+    intersections = telemetry.get(
+        "intersections"
+    )
+
+    rows = []
+
+    if isinstance(intersections, dict):
+
+        for intersection_id, data in intersections.items():
+
+            if not isinstance(data, dict):
+                data = {}
+
+            vehicles = data.get(
+                "vehicle_count",
+                data.get("count", total_vehicles)
+            )
+
+            queue = data.get(
+                "queue_length",
+                max(0, int(vehicles * 0.25))
+            )
+
+            density = data.get(
+                "vehicle_density",
+                min(1.0, vehicles / 50.0)
+            )
+
+            waiting = data.get(
+                "waiting_time",
+                max(0.0, queue * 2.0)
+            )
+
+            rows.append({
+                "intersection_id": intersection_id,
+                "current_signal": data.get(
+                    "current_signal",
+                    "NS_GREEN"
+                ),
+                "vehicle_density": float(density),
+                "queue_length": int(queue),
+                "waiting_time": float(waiting),
+                "throughput": float(
+                    data.get(
+                        "throughput",
+                        vehicles
+                    )
+                ),
+                "vehicle_count": int(vehicles),
+                "unique_vehicle_count": int(
+                    data.get(
+                        "unique_vehicle_count",
+                        unique_vehicles
+                    )
+                ),
+            })
+
+    # --------------------------------------------------------
+    # No intersection telemetry
+    # --------------------------------------------------------
+
+    if not rows:
+
+        intersection_list = (
+            INTERSECTIONS
+            if INTERSECTIONS
+            else ["J1", "J2", "J3", "J4", "J5", "J6"]
+        )
+
+        # Distribute detected traffic across intersections
+        count_per_intersection = max(
+            0,
+            int(total_vehicles / max(1, len(intersection_list)))
+        )
+
+        for intersection_id in intersection_list:
+
+            density = min(
+                1.0,
+                count_per_intersection / 50.0
+            )
+
+            queue = max(
+                0,
+                int(count_per_intersection * 0.25)
+            )
+
+            waiting = queue * 2.0
+
+            rows.append({
+                "intersection_id": intersection_id,
+                "current_signal": "NS_GREEN",
+                "vehicle_density": float(density),
+                "queue_length": int(queue),
+                "waiting_time": float(waiting),
+                "throughput": float(
+                    count_per_intersection
+                ),
+                "vehicle_count": int(
+                    count_per_intersection
+                ),
+                "unique_vehicle_count": int(
+                    unique_vehicles
+                ),
+            })
+
+    df = pd.DataFrame(rows)
+
+    # --------------------------------------------------------
+    # Calculate additional traffic intelligence
+    # --------------------------------------------------------
+
+    try:
+        df = compute_density_for_dataframe(df)
+    except Exception:
+        pass
+
+    try:
+        df = compute_congestion_for_dataframe(df)
+    except Exception:
+        pass
+
+    try:
+        df = detect_queue_from_dataframe(df)
+    except Exception:
+        pass
+
+    return df
+
+
+# ============================================================
+# LIVE VISION PROCESSING
+# ============================================================
+
+if mode == "Live Vision":
+
+    st.header("🎥 Real-Time Vision")
+
+    if not WEBSOCKET_AVAILABLE:
+
+        st.error(
+            "Install websocket-client:"
+        )
+
+        st.code(
+            "pip install websocket-client"
+        )
+
+    elif not st.session_state.camera_started:
+
+        st.info(
+            "Start the camera from the sidebar."
+        )
+
     else:
-        st.info("ℹ️ Emergency corridor deactivated. Restored normal optimized signal configuration.")
-        if st.button("🚑 Re-activate Emergency Corridor", key="reactivate_btn"):
-            st.session_state["emergency_restored"] = False
-            st.rerun()
 
-    st.markdown("---")
+        with st.spinner(
+            "Receiving YOLO detection..."
+        ):
 
-# PART 1 — ROAD NETWORK VISUALIZATION ("🗺️ Urban Traffic Network")
-st.markdown("### 🗺️ Urban Traffic Network")
+            packet = receive_live_frame(
+                timeout=10
+            )
 
-def draw_network_visualization(t_df, active_emergency_nodes=None):
-    G = nx.Graph()
-    nodes = ["J1", "J2", "J3", "J4", "J5", "J6"]
-    
-    # Layout matches required topology:
-    # J1 -------- J2
-    # |            |
-    # J3 -------- J4
-    #   \        /
-    #     J5
-    #     |
-    #     J6
-    positions = {
-        "J1": (0.0, 2.0), "J2": (2.0, 2.0),
-        "J3": (0.0, 1.0), "J4": (2.0, 1.0),
-        "J5": (1.0, 0.2),
-        "J6": (1.0, -0.6)
+        if packet:
+
+            st.session_state.live_packet = packet
+
+            telemetry = packet.get(
+                "telemetry",
+                {}
+            )
+
+            st.session_state.live_telemetry = (
+                telemetry
+            )
+
+            st.session_state.live_frame = (
+                packet.get("frame")
+            )
+
+            live_df = telemetry_to_dataframe(
+                telemetry
+            )
+
+            st.session_state.live_dataframe = (
+                live_df
+            )
+
+        if st.session_state.live_frame:
+
+            try:
+
+                image_data = (
+                    st.session_state.live_frame
+                )
+
+                if "," in image_data:
+                    image_data = (
+                        image_data.split(",", 1)[1]
+                    )
+
+                image_bytes = base64.b64decode(
+                    image_data
+                )
+
+                st.image(
+                    image_bytes,
+                    caption="Live YOLO Detection",
+                    use_container_width=True,
+                )
+
+            except Exception as e:
+
+                st.warning(
+                    f"Could not display detection frame: {e}"
+                )
+
+        telemetry = (
+            st.session_state.live_telemetry
+        )
+
+        if telemetry:
+
+            st.subheader(
+                "📡 Live Detection Telemetry"
+            )
+
+            # ------------------------------------------------
+            # Top live metrics
+            # ------------------------------------------------
+
+            active_count = (
+                telemetry.get(
+                    "active_count",
+                    telemetry.get(
+                        "vehicle_count",
+                        telemetry.get(
+                            "count",
+                            0
+                        )
+                    )
+                )
+            )
+
+            unique_count = (
+                telemetry.get(
+                    "unique_count",
+                    telemetry.get(
+                        "unique_vehicles",
+                        0
+                    )
+                )
+            )
+
+            fps = telemetry.get(
+                "fps",
+                telemetry.get(
+                    "processing_fps",
+                    0
+                )
+            )
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.metric(
+                    "🚗 Active Vehicles",
+                    int(active_count or 0)
+                )
+
+            with col2:
+                st.metric(
+                    "🆔 Unique Vehicles",
+                    int(unique_count or 0)
+                )
+
+            with col3:
+                st.metric(
+                    "⚡ Processing FPS",
+                    f"{float(fps or 0):.1f}"
+                )
+
+            # ------------------------------------------------
+            # Raw telemetry
+            # ------------------------------------------------
+
+            with st.expander(
+                "Raw Vision Telemetry"
+            ):
+
+                st.json(telemetry)
+
+        # ----------------------------------------------------
+        # Use vision data as optimization input
+        # ----------------------------------------------------
+
+        if st.session_state.live_dataframe is not None:
+
+            traffic_data = (
+                st.session_state.live_dataframe
+            )
+
+            st.session_state.traffic_data = (
+                traffic_data
+            )
+
+        else:
+
+            traffic_data = (
+                st.session_state.traffic_data
+            )
+
+else:
+
+    # ========================================================
+    # SIMULATION MODE
+    # ========================================================
+
+    if generate_button or (
+        st.session_state.traffic_data is None
+        or st.session_state.scenario != scenario
+    ):
+
+        try:
+
+            traffic_data = generate_traffic(
+                scenario=scenario,
+                seed=seed,
+            )
+
+            st.session_state.traffic_data = (
+                traffic_data
+            )
+
+            st.session_state.scenario = (
+                scenario
+            )
+
+            st.session_state.optimized_data = None
+            st.session_state.optimization_result = None
+            st.session_state.solver_metadata = None
+
+        except Exception as e:
+
+            st.error(
+                f"Traffic generation failed: {e}"
+            )
+
+            st.stop()
+
+    traffic_data = (
+        st.session_state.traffic_data
+    )
+
+
+# ============================================================
+# ENSURE DATA EXISTS
+# ============================================================
+
+traffic_data = (
+    st.session_state.traffic_data
+    if traffic_data is None
+    else traffic_data
+)
+
+traffic_data = st.session_state.get("traffic_data")
+
+if traffic_data is None:
+
+    st.info(
+        "No traffic data available."
+    )
+
+    st.stop()
+
+
+# ============================================================
+# EMERGENCY VEHICLE
+# ============================================================
+
+if scenario == "Emergency Vehicle":
+
+    if (
+        st.session_state.emergency_vehicle
+        is None
+    ):
+
+        st.session_state.emergency_vehicle = (
+            EmergencyVehicle(
+                vehicle_id="EV-01",
+                route=[
+                    "J1",
+                    "J2",
+                    "J4",
+                ],
+            )
+        )
+
+    emergency_vehicle = (
+        st.session_state.emergency_vehicle
+    )
+
+    corridor = EmergencyCorridor(
+        route=[
+            "J1",
+            "J2",
+            "J4",
+        ]
+    )
+
+    try:
+
+        traffic_data = (
+            corridor.mark_traffic_data(
+                traffic_data,
+                emergency_vehicle,
+            )
+        )
+
+        st.session_state.traffic_data = (
+            traffic_data
+        )
+
+    except Exception as e:
+
+        st.warning(
+            f"Emergency corridor update failed: {e}"
+        )
+
+
+# ============================================================
+# SCENARIO INFORMATION
+# ============================================================
+
+if scenario == "Emergency Vehicle":
+
+    ev = (
+        st.session_state.emergency_vehicle
+    )
+
+    st.markdown(
+        f"""
+        <div class="emergency-box">
+        <h3>🚑 Emergency Vehicle Active</h3>
+
+        <b>Vehicle:</b> {ev.vehicle_id}<br>
+        <b>Current Intersection:</b>
+        {ev.current_intersection}<br>
+        <b>Next Intersection:</b>
+        {ev.next_intersection}<br>
+        <b>Emergency Route:</b>
+        J1 → J2 → J4
+
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+elif scenario == "Accident / Road Closure":
+
+    st.warning(
+        "⚠️ Accident scenario active."
+    )
+
+    try:
+
+        accident_detector = AccidentDetector()
+
+        alerts = (
+            accident_detector
+            .detect_from_dataframe(
+                traffic_data
+            )
+        )
+
+        if alerts:
+
+            for alert in alerts:
+
+                st.markdown(
+                    f"""
+                    <div class="accident-box">
+                    <b>⚠️ Incident Alert —
+                    {alert['intersection_id']}</b><br>
+
+                    Severity:
+                    <b>{alert['severity']}</b>
+                    |
+                    Score:
+                    {alert['accident_score']}<br>
+
+                    Reasons:
+                    {', '.join(alert['reasons'])}<br>
+
+                    Action:
+                    {alert['recommended_action']}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+    except Exception as e:
+
+        st.warning(
+            f"Accident detection unavailable: {e}"
+        )
+
+elif scenario == "Heavy Congestion":
+
+    st.warning(
+        "🚗 Heavy congestion scenario active."
+    )
+
+else:
+
+    st.success(
+        "✅ Normal traffic scenario active."
+    )
+
+
+# ============================================================
+# RUN QAOA / OPTIMIZATION
+# ============================================================
+
+if run_button:
+
+    with st.spinner(
+        "Running QUBO + QAOA optimization..."
+    ):
+
+        try:
+
+            optimization_result = (
+                optimize_signals(
+                    traffic_data
+                )
+            )
+
+            try:
+
+                st.session_state.solver_metadata = (
+                    get_solver_metadata()
+                )
+
+            except Exception:
+
+                st.session_state.solver_metadata = {}
+
+            # ------------------------------------------------
+            # EMERGENCY OVERRIDE
+            # ------------------------------------------------
+
+            if scenario == "Emergency Vehicle":
+
+                emergency_vehicle = (
+                    st.session_state
+                    .emergency_vehicle
+                )
+
+                corridor = EmergencyCorridor(
+                    route=[
+                        "J1",
+                        "J2",
+                        "J4",
+                    ]
+                )
+
+                overrides = (
+                    corridor.create_signal_override(
+                        traffic_data,
+                        emergency_vehicle,
+                    )
+                )
+
+                optimization_result = (
+                    optimization_result.copy()
+                )
+
+                if "emergency_priority" not in (
+                    optimization_result.columns
+                ):
+
+                    optimization_result[
+                        "emergency_priority"
+                    ] = "NONE"
+
+                for index, row in (
+                    optimization_result.iterrows()
+                ):
+
+                    intersection = str(
+                        row[
+                            "intersection_id"
+                        ]
+                    )
+
+                    if intersection not in overrides:
+                        continue
+
+                    override = (
+                        overrides[
+                            intersection
+                        ]
+                    )
+
+                    priority = (
+                        override[
+                            "priority"
+                        ]
+                    )
+
+                    if priority in [
+                        "ACTIVE",
+                        "PREPARE",
+                        "CORRIDOR",
+                    ]:
+
+                        optimization_result.loc[
+                            index,
+                            "optimized_green_time"
+                        ] = override[
+                            "green_time"
+                        ]
+
+                        optimization_result.loc[
+                            index,
+                            "decision"
+                        ] = (
+                            "EMERGENCY_PRIORITY"
+                        )
+
+                        optimization_result.loc[
+                            index,
+                            "emergency_priority"
+                        ] = priority
+
+            # ------------------------------------------------
+            # APPLY OPTIMIZATION
+            # ------------------------------------------------
+
+            optimized_data = (
+                apply_optimization(
+                    traffic_data,
+                    optimization_result,
+                )
+            )
+
+            # ------------------------------------------------
+            # EMERGENCY FINAL ADJUSTMENT
+            # ------------------------------------------------
+
+            if (
+                scenario == "Emergency Vehicle"
+                and st.session_state.emergency_vehicle
+            ):
+
+                active_intersection = (
+                    st.session_state
+                    .emergency_vehicle
+                    .current_intersection
+                )
+
+                for index, row in (
+                    optimized_data.iterrows()
+                ):
+
+                    if str(
+                        row["intersection_id"]
+                    ) == str(
+                        active_intersection
+                    ):
+
+                        if "waiting_time" in (
+                            optimized_data.columns
+                        ):
+
+                            optimized_data.loc[
+                                index,
+                                "waiting_time"
+                            ] *= 0.35
+
+                        if "queue_length" in (
+                            optimized_data.columns
+                        ):
+
+                            optimized_data.loc[
+                                index,
+                                "queue_length"
+                            ] *= 0.50
+
+            # ------------------------------------------------
+            # STORE
+            # ------------------------------------------------
+
+            st.session_state.optimization_result = (
+                optimization_result
+            )
+
+            st.session_state.optimized_data = (
+                optimized_data
+            )
+
+            # ------------------------------------------------
+            # SAVE
+            # ------------------------------------------------
+
+            try:
+
+                save_simulation(
+                    optimized_data,
+                    "data/traffic_data.csv",
+                )
+
+            except Exception:
+                pass
+
+            st.success(
+                "✅ Optimization completed successfully."
+            )
+
+        except Exception as e:
+
+            st.error(
+                f"Optimization failed: {e}"
+            )
+
+            st.exception(e)
+
+
+# ============================================================
+# RESULTS
+# ============================================================
+
+optimization_result = (
+    st.session_state.optimization_result
+)
+
+optimized_data = (
+    st.session_state.optimized_data
+)
+
+
+# ============================================================
+# SOLVER METADATA
+# ============================================================
+
+solver_meta = (
+    st.session_state.solver_metadata
+)
+
+if solver_meta:
+
+    solver_name = solver_meta.get(
+        "solver_used",
+        "N/A"
+    )
+
+    quantum_used = solver_meta.get(
+        "quantum_used",
+        False
+    )
+
+    objective = solver_meta.get(
+        "objective_value",
+        0
+    )
+
+    try:
+        objective_text = (
+            f"{float(objective):.6f}"
+        )
+    except Exception:
+        objective_text = str(objective)
+
+    st.markdown(
+        f"""
+        <div class="solver-box">
+
+        <h4>⚛️ Quantum Solver Details</h4>
+
+        <b>Solver:</b> {solver_name}<br>
+
+        <b>Quantum Used:</b>
+        {"✅ Yes" if quantum_used else "❌ Classical Fallback"}<br>
+
+        <b>Objective Value:</b>
+        {objective_text}
+
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
+# TRAFFIC METRICS
+# ============================================================
+
+st.header("📊 Traffic Overview")
+
+try:
+
+    before_metrics = calculate_metrics(
+        traffic_data
+    )
+
+except Exception:
+
+    before_metrics = {
+        "total_traffic": len(traffic_data),
+        "total_queue_length": 0,
+        "average_waiting_time": 0,
+        "estimated_throughput": 0,
+        "average_density": 0,
+        "estimated_fuel_litres": 0,
+        "estimated_co2_kg": 0,
+        "congestion_level": "Unknown",
     }
 
-    edges = [
-        ("J1", "J2"), ("J1", "J3"),
-        ("J2", "J4"),
-        ("J3", "J4"), ("J3", "J5"),
-        ("J4", "J5"),
-        ("J5", "J6")
-    ]
-    G.add_nodes_from(nodes)
-    G.add_edges_from(edges)
 
-    density_map = dict(zip(t_df["intersection_id"], t_df["vehicle_density"]))
-    emerg_set = set(active_emergency_nodes) if active_emergency_nodes else set()
+if optimized_data is not None:
 
-    node_colors = []
-    for n in nodes:
-        if n in emerg_set:
-            node_colors.append("#1098ad")  # Blue/Cyan for Emergency Route
-        else:
-            d = density_map.get(n, 0.3)
-            if d > 0.7:
-                node_colors.append("#e03131")  # RED for High Traffic
-            elif d > 0.4:
-                node_colors.append("#f59f00")  # YELLOW/AMBER for Medium Traffic
-            else:
-                node_colors.append("#2b8a3e")  # GREEN for Low Traffic
+    try:
 
-    fig, ax = plt.subplots(figsize=(9, 4.0), facecolor="#ffffff")
-    ax.set_facecolor("#ffffff")
+        after_metrics = calculate_metrics(
+            optimized_data
+        )
 
-    nx.draw_networkx_nodes(G, positions, node_color=node_colors, node_size=1600, ax=ax)
+    except Exception:
 
-    # Edge styling
-    edge_colors = []
-    widths = []
-    for u, v in edges:
-        if active_emergency_nodes and u in emerg_set and v in emerg_set:
-            edge_colors.append("#1098ad")
-            widths.append(4.5)
-        else:
-            edge_colors.append("#adb5bd")
-            widths.append(2.0)
+        after_metrics = before_metrics
 
-    nx.draw_networkx_edges(G, positions, edge_color=edge_colors, width=widths, ax=ax)
-    nx.draw_networkx_labels(G, positions, font_color="#ffffff", font_weight="bold", font_size=12, ax=ax)
+else:
 
-    # Legend & annotations
-    ax.text(2.6, 2.0, "🟢 Low Traffic (< 0.4)", fontsize=9, color="#2b8a3e", fontweight="bold")
-    ax.text(2.6, 1.6, "🟡 Medium Traffic (0.4 - 0.7)", fontsize=9, color="#f59f00", fontweight="bold")
-    ax.text(2.6, 1.2, "🔴 High Traffic (> 0.7)", fontsize=9, color="#e03131", fontweight="bold")
-    if active_emergency_nodes:
-        ax.text(2.6, 0.8, "🔵 Emergency Route", fontsize=9, color="#1098ad", fontweight="bold")
+    after_metrics = before_metrics
 
-    ax.axis("off")
-    plt.tight_layout()
-    return fig
 
-emerg_nodes_for_graph = emergency_route if (selected_scenario == "Emergency Vehicle" and not st.session_state.get("emergency_restored", False)) else None
-fig_net = draw_network_visualization(traffic_data, emerg_nodes_for_graph)
-st.pyplot(fig_net)
+col1, col2, col3, col4 = st.columns(4)
 
-st.markdown("---")
+with col1:
 
-# PART 3 — BEFORE VS AFTER SECTION ("📊 Before vs After Optimization")
-st.markdown("### 📊 Before vs After Optimization")
+    st.metric(
+        "🚗 Total Traffic",
+        f"{before_metrics.get('total_traffic', 0):.0f}",
+    )
 
-b_col1, b_col2, b_col3, b_col4, b_col5 = st.columns(5)
-with b_col1:
-    st.metric("Average Waiting Time", f"{optimized_metrics['average_waiting_time']} s", f"Baseline: {classical_metrics['average_waiting_time']} s")
-with b_col2:
-    st.metric("Total Queue Length", f"{int(optimized_metrics['total_queue_length'])} veh", f"Baseline: {int(classical_metrics['total_queue_length'])} veh")
-with b_col3:
-    st.metric("Throughput", f"{optimized_metrics['throughput']} veh/min", f"Baseline: {classical_metrics['throughput']} veh/min")
-with b_col4:
-    st.metric("Fuel Consumption", f"{optimized_metrics['fuel_consumption']} L", f"Baseline: {classical_metrics['fuel_consumption']} L")
-with b_col5:
-    st.metric("CO2 Emissions", f"{optimized_metrics['co2_emissions']} kg", f"Baseline: {classical_metrics['co2_emissions']} kg")
+with col2:
 
-# Bar Chart Comparisons using Matplotlib
-fig_comp, axes = plt.subplots(1, 3, figsize=(12, 3.6), facecolor="#ffffff")
+    st.metric(
+        "🚦 Queue",
+        f"{before_metrics.get('total_queue_length', 0):.0f}",
+    )
 
-metrics_list = ["average_waiting_time", "total_queue_length", "throughput"]
-titles = ["Avg Waiting Time (s)", "Total Queue Length (veh)", "Throughput (veh/min)"]
+with col3:
 
-for idx, (m_key, title) in enumerate(zip(metrics_list, titles)):
-    ax = axes[idx]
-    ax.set_facecolor("#f8f9fa")
+    st.metric(
+        "⏱ Avg Waiting",
+        f"{before_metrics.get('average_waiting_time', 0):.1f} s",
+    )
 
-    c_val = classical_metrics[m_key]
-    o_val = optimized_metrics[m_key]
+with col4:
 
-    bars = ax.bar(["Classical Fixed", "Optimized Signal"], [c_val, o_val], color=["#74c0fc", "#3b5bdb"], width=0.45)
-    ax.set_title(title, color="#212529", fontsize=11, fontweight="bold")
-    ax.tick_params(colors="#495057", labelsize=9)
-    ax.grid(axis="y", linestyle="--", alpha=0.4, color="#ced4da")
+    st.metric(
+        "📈 Throughput",
+        f"{before_metrics.get('estimated_throughput', 0):.0f}",
+    )
 
-    for bar in bars:
-        height = bar.get_height()
-        ax.annotate(f"{height:.1f}",
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3),
-                    textcoords="offset points",
-                    ha='center', va='bottom', color="#212529", fontsize=9, fontweight="bold")
 
-plt.tight_layout()
-st.pyplot(fig_comp)
+# ============================================================
+# LIVE / CURRENT TRAFFIC TABLE
+# ============================================================
 
-st.markdown("---")
+st.header("🛣️ Current Traffic State")
 
-# PART 4 — SIGNAL CHANGES ("🚦 Signal Timing Changes")
-st.markdown("### 🚦 Signal Timing Changes")
-
-disp_signals = display_signals.copy()
-
-# Add Change column (+30 or 0)
-changes = []
-decisions = []
-
-for _, row in disp_signals.iterrows():
-    orig = int(row.get("original_green_time", 45))
-    opt = int(row.get("optimized_green_time", 45))
-    diff = opt - orig
-    change_str = f"+{diff}" if diff > 0 else "0"
-    changes.append(change_str)
-    
-    dec = str(row.get("decision", "KEEP"))
-    if dec == "INCREASE_GREEN":
-        decisions.append("INCREASE")
-    else:
-        decisions.append(dec)
-
-disp_signals["Change"] = changes
-disp_signals["Decision"] = decisions
-
-disp_timing_table = disp_signals[[
-    "intersection_id", "original_green_time", "optimized_green_time", "Change", "Decision"
-]].copy()
-
-disp_timing_table.columns = [
-    "Intersection", "Original Green Time (s)", "Optimized Green Time (s)", "Change (s)", "Decision"
+display_columns = [
+    "intersection_id",
+    "current_signal",
+    "vehicle_density",
+    "queue_length",
+    "waiting_time",
+    "throughput",
+    "congestion_level",
+    "vehicle_count",
+    "unique_vehicle_count",
 ]
 
-def style_signal_changes(val):
-    if val == "INCREASE":
-        return "background-color: #d0ebff; color: #1864ab; font-weight: bold;"
-    return ""
+available_columns = [
+    c for c in display_columns
+    if c in traffic_data.columns
+]
 
 st.dataframe(
-    disp_timing_table.style.map(style_signal_changes, subset=["Decision"]),
+    traffic_data[available_columns],
     use_container_width=True,
-    hide_index=True
+    hide_index=True,
 )
 
-st.markdown("---")
 
-# PART 5 — QUANTUM OPTIMIZATION EXPLANATION ("⚛️ How Our Quantum Optimization Works")
-with st.expander("⚛️ How Our Quantum Optimization Works"):
-    st.markdown("""
-    #### Optimization Pipeline:
-    ```text
-    Traffic Data (Simulation)
-           │
-           ▼
-    QUBO Formulation (6x6 Matrix)
-           │
-           ▼
-    Binary Signal Decisions (x_i ∈ {0, 1})
-           │
-           ▼
-    QAOA / Hybrid Optimization
-           │
-           ▼
-    Optimized Signal Timing
-    ```
+# ============================================================
+# QUBO MATRIX
+# ============================================================
 
-    **Formulation Overview**:
-    - Traffic conditions are converted into a Quadratic Unconstrained Binary Optimization (QUBO) problem.
-    - Binary variables ($x_i \in \{0, 1\}$) represent signal timing decisions ($x_i = 1 \implies \text{INCREASE}$, $x_i = 0 \implies \text{KEEP}$).
-    - QAOA or the hybrid optimizer searches for a low-cost signal configuration minimizing overall network congestion and queue delays.
+if optimization_result is not None:
 
-    **Optimization Method**:
-    - **QAOA / Hybrid Quantum-Classical**
-    - **Execution Engine Status**: <span style="background-color: #e7f5ff; color: #1864ab; padding: 3px 8px; border-radius: 4px; font-weight: 600;">Classical fallback used for this run</span> *(exact 64 binary state evaluation)*.
-    """, unsafe_allow_html=True)
+    with st.expander(
+        "🔢 QUBO Matrix",
+        expanded=False
+    ):
+
+        try:
+
+            qubo_result = create_qubo(
+                traffic_data
+            )
+
+            Q = qubo_result["Q"]
+
+            st.write(
+                "**QUBO Matrix Q:**"
+            )
+
+            q_df = pd.DataFrame(
+                np.round(Q, 3),
+                columns=qubo_result[
+                    "intersections"
+                ],
+                index=qubo_result[
+                    "intersections"
+                ],
+            )
+
+            st.dataframe(
+                q_df,
+                use_container_width=True,
+            )
+
+            st.write(
+                "**Demand Scores:**"
+            )
+
+            st.json(
+                qubo_result.get(
+                    "demand_scores",
+                    {}
+                )
+            )
+
+            if qubo_result.get(
+                "priority_scores"
+            ):
+
+                st.write(
+                    "**Priority Scores:**"
+                )
+
+                st.json(
+                    qubo_result[
+                        "priority_scores"
+                    ]
+                )
+
+        except Exception as e:
+
+            st.error(
+                f"QUBO display error: {e}"
+            )
+
+
+# ============================================================
+# OPTIMIZATION RESULTS
+# ============================================================
+
+if optimization_result is not None:
+
+    st.header(
+        "⚛️ Quantum Optimization Results"
+    )
+
+    result_columns = [
+        "intersection_id",
+        "current_signal",
+        "original_green_time",
+        "optimized_green_time",
+        "decision",
+        "estimated_waiting_time",
+        "emergency_priority",
+    ]
+
+    available_result_columns = [
+        c for c in result_columns
+        if c in optimization_result.columns
+    ]
+
+    st.dataframe(
+        optimization_result[
+            available_result_columns
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    try:
+
+        st.plotly_chart(
+            create_signal_timing_chart(
+                optimization_result
+            ),
+            use_container_width=True,
+        )
+
+    except Exception as e:
+
+        st.warning(
+            f"Signal chart unavailable: {e}"
+        )
+
+
+# ============================================================
+# BEFORE VS AFTER
+# ============================================================
+
+if optimized_data is not None:
+
+    st.header(
+        "📈 Before vs After Optimization"
+    )
+
+    try:
+
+        comparison = compare_metrics(
+            traffic_data,
+            optimized_data,
+        )
+
+        queue_change = comparison[
+            "total_queue_length"
+        ]
+
+        waiting_change = comparison[
+            "average_waiting_time"
+        ]
+
+        throughput_change = comparison[
+            "estimated_throughput"
+        ]
+
+        co2_change = comparison[
+            "estimated_co2_kg"
+        ]
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+
+            st.metric(
+                "Queue",
+                f"{queue_change['after']:.1f}",
+                f"{queue_change['change']:.1f}",
+            )
+
+        with col2:
+
+            st.metric(
+                "Waiting Time",
+                f"{waiting_change['after']:.1f} s",
+                f"{waiting_change['change']:.1f} s",
+            )
+
+        with col3:
+
+            st.metric(
+                "Throughput",
+                f"{throughput_change['after']:.1f}",
+                f"{throughput_change['change']:.1f}",
+            )
+
+        with col4:
+
+            st.metric(
+                "CO₂",
+                f"{co2_change['after']:.2f} kg",
+                f"{co2_change['change']:.2f}",
+            )
+
+        chart_col1, chart_col2 = st.columns(2)
+
+        with chart_col1:
+
+            st.plotly_chart(
+                create_comparison_chart(
+                    comparison
+                ),
+                use_container_width=True,
+            )
+
+        with chart_col2:
+
+            st.plotly_chart(
+                create_improvement_chart(
+                    comparison
+                ),
+                use_container_width=True,
+            )
+
+    except Exception as e:
+
+        st.warning(
+            f"Comparison unavailable: {e}"
+        )
+
+
+# ============================================================
+# INTERSECTION ANALYSIS
+# ============================================================
+
+st.header(
+    "📍 Intersection Performance"
+)
+
+try:
+
+    intersection_data = intersection_metrics(
+        optimized_data
+        if optimized_data is not None
+        else traffic_data
+    )
+
+    if not intersection_data.empty:
+
+        st.dataframe(
+            intersection_data,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+except Exception as e:
+
+    st.warning(
+        f"Intersection analysis unavailable: {e}"
+    )
+
+
+# ============================================================
+# QUEUE CHART
+# ============================================================
+
+try:
+
+    st.plotly_chart(
+        create_queue_chart(
+            optimized_data
+            if optimized_data is not None
+            else traffic_data
+        ),
+        use_container_width=True,
+    )
+
+except Exception:
+    pass
+
+
+# ============================================================
+# DENSITY GAUGES
+# ============================================================
+
+gauge_col1, gauge_col2 = st.columns(2)
+
+with gauge_col1:
+
+    try:
+
+        avg_density = before_metrics.get(
+            "average_density",
+            0
+        )
+
+        st.plotly_chart(
+            create_density_gauge(
+                avg_density,
+                "Before Optimization"
+            ),
+            use_container_width=True,
+        )
+
+    except Exception:
+        pass
+
+
+with gauge_col2:
+
+    try:
+
+        after_density = (
+            after_metrics.get(
+                "average_density",
+                0
+            )
+        )
+
+        st.plotly_chart(
+            create_density_gauge(
+                after_density,
+                "After Optimization"
+            ),
+            use_container_width=True,
+        )
+
+    except Exception:
+        pass
+
+
+# ============================================================
+# ROUTE OPTIMIZATION
+# ============================================================
+
+st.header(
+    "🛣️ Route Optimization"
+)
+
+routes = {}
+
+try:
+
+    router = RouteOptimizer()
+
+    current_traffic = (
+        optimized_data
+        if optimized_data is not None
+        else traffic_data
+    )
+
+    router.update_weights_from_traffic(
+        current_traffic
+    )
+
+    blocked_nodes = []
+
+    if scenario == "Accident / Road Closure":
+        blocked_nodes = ["J3"]
+
+    routes = router.get_all_routes(
+        route_source,
+        route_target,
+        blocked_nodes=blocked_nodes,
+    )
+
+    route_col1, route_col2, route_col3 = (
+        st.columns(3)
+    )
+
+    with route_col1:
+
+        st.subheader(
+            "📏 Shortest Path"
+        )
+
+        shortest = routes.get(
+            "shortest"
+        )
+
+        if shortest:
+
+            st.write(
+                f"**Path:** "
+                f"{' → '.join(shortest['path'])}"
+            )
+
+            st.write(
+                f"**Hops:** "
+                f"{shortest['hops']}"
+            )
+
+        else:
+
+            st.warning(
+                "No path found."
+            )
+
+    with route_col2:
+
+        st.subheader(
+            "🚦 Traffic-Aware"
+        )
+
+        traffic_route = routes.get(
+            "traffic_aware"
+        )
+
+        if traffic_route:
+
+            st.write(
+                f"**Path:** "
+                f"{' → '.join(traffic_route['path'])}"
+            )
+
+            st.write(
+                f"**Est. Time:** "
+                f"{traffic_route['total_time']:.1f}s"
+            )
+
+            st.write(
+                f"**Distance:** "
+                f"{traffic_route['total_distance']:.2f} km"
+            )
+
+        else:
+
+            st.warning(
+                "No path found."
+            )
+
+    with route_col3:
+
+        st.subheader(
+            "🚑 Emergency Bypass"
+        )
+
+        emergency_route = routes.get(
+            "emergency"
+        )
+
+        if emergency_route:
+
+            st.write(
+                f"**Path:** "
+                f"{' → '.join(emergency_route['path'])}"
+            )
+
+            st.write(
+                f"**Est. Time:** "
+                f"{emergency_route['total_time']:.1f}s"
+            )
+
+            if emergency_route.get(
+                "blocked_avoided"
+            ):
+
+                st.write(
+                    f"**Avoided:** "
+                    f"{', '.join(emergency_route['blocked_avoided'])}"
+                )
+
+        else:
+
+            st.warning(
+                "No bypass route available."
+            )
+
+except Exception as e:
+
+    st.error(
+        f"Route optimization error: {e}"
+    )
+
+
+# ============================================================
+# INTERACTIVE MAP
+# ============================================================
+
+st.header(
+    "🗺️ Traffic Network Map"
+)
+
+try:
+
+    import streamlit_folium
+
+    emergency_route_nodes = []
+
+    if scenario == "Emergency Vehicle":
+
+        emergency_route_nodes = [
+            "J1",
+            "J2",
+            "J4"
+        ]
+
+    blocked_nodes_map = []
+
+    if scenario == "Accident / Road Closure":
+
+        blocked_nodes_map = ["J3"]
+
+    opt_route = None
+
+    if routes.get(
+        "traffic_aware"
+    ):
+
+        opt_route = routes[
+            "traffic_aware"
+        ]["path"]
+
+    traffic_map = create_traffic_map(
+        traffic_data=current_traffic,
+        emergency_route=(
+            emergency_route_nodes
+        ),
+        blocked_intersections=(
+            blocked_nodes_map
+        ),
+        optimized_route=opt_route,
+    )
+
+    streamlit_folium.folium_static(
+        traffic_map,
+        width=None,
+        height=500,
+    )
+
+except ImportError:
+
+    st.info(
+        "Install streamlit-folium:"
+    )
+
+    st.code(
+        "pip install streamlit-folium"
+    )
+
+except Exception as e:
+
+    st.error(
+        f"Map display error: {e}"
+    )
+
+
+# ============================================================
+# EMERGENCY METRICS
+# ============================================================
+
+if scenario == "Emergency Vehicle":
+
+    st.header(
+        "🚑 Emergency Performance"
+    )
+
+    data_for_emergency = (
+        optimized_data
+        if optimized_data is not None
+        else traffic_data
+    )
+
+    try:
+
+        emergency_metrics = (
+            calculate_metrics(
+                data_for_emergency
+            )
+        )
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+
+            st.metric(
+                "Emergency Corridor Wait",
+                f"{emergency_metrics.get('emergency_corridor_waiting_time', 0):.2f} s",
+            )
+
+        with col2:
+
+            st.metric(
+                "Emergency Response Delay",
+                f"{emergency_metrics.get('emergency_response_delay', 0):.2f} s",
+            )
+
+        with col3:
+
+            st.metric(
+                "Active Intersection",
+                str(
+                    st.session_state
+                    .emergency_vehicle
+                    .current_intersection
+                ),
+            )
+
+        st.markdown(
+            """
+            <div class="success-box">
+
+            🚑 <b>Emergency corridor:</b>
+
+            J1 → J2 → J4
+
+            <br><br>
+
+            The active emergency intersection receives
+            the highest signal priority.
+
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    except Exception as e:
+
+        st.warning(
+            f"Emergency metrics unavailable: {e}"
+        )
+
+
+# ============================================================
+# ENVIRONMENTAL METRICS
+# ============================================================
+
+st.header(
+    "🌱 Environmental Impact"
+)
+
+environment_data = (
+    optimized_data
+    if optimized_data is not None
+    else traffic_data
+)
+
+try:
+
+    environment_metrics = (
+        calculate_metrics(
+            environment_data
+        )
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+
+        st.metric(
+            "Fuel Consumption",
+            f"{environment_metrics.get('estimated_fuel_litres', 0):.2f} L",
+        )
+
+    with col2:
+
+        st.metric(
+            "CO₂ Emissions",
+            f"{environment_metrics.get('estimated_co2_kg', 0):.2f} kg",
+        )
+
+    with col3:
+
+        st.metric(
+            "Congestion",
+            environment_metrics.get(
+                "congestion_level",
+                "Unknown"
+            ),
+        )
+
+except Exception as e:
+
+    st.warning(
+        f"Environmental metrics unavailable: {e}"
+    )
+
+
+# ============================================================
+# EXPORT
+# ============================================================
+
+st.header(
+    "📥 Export"
+)
+
+csv_data = (
+    optimized_data
+    if optimized_data is not None
+    else traffic_data
+)
+
+csv_bytes = csv_data.to_csv(
+    index=False
+).encode("utf-8")
+
+st.download_button(
+    label="⬇️ Download Traffic Results",
+    data=csv_bytes,
+    file_name="optimized_traffic.csv",
+    mime="text/csv",
+)
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "Quantum Traffic Optimization | "
+    "Real-Time YOLO Detection + "
+    "QUBO + QAOA + Emergency Priority + "
+    "Traffic Analytics + Route Optimization + "
+    "Performance Analytics"
+)

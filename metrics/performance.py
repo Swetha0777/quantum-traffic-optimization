@@ -1,202 +1,855 @@
 """
 Module: Performance & Metrics Evaluation
-Assigned to: Team Member 4 (Analytics & Metrics Lead)
-Description: Calculates traffic performance metrics (delay, queue length, throughput, fuel consumption, CO2 emissions)
-             for classical baseline vs optimized traffic signal configurations.
+
+Purpose:
+    Calculate traffic performance before and after optimization.
+
+Metrics:
+    - Total traffic
+    - Queue length
+    - Average waiting time
+    - Traffic density
+    - Throughput
+    - Congestion level
+    - Estimated fuel consumption
+    - Estimated CO2 emissions
+    - Emergency corridor waiting time
+    - Emergency response delay
+    - Improvement percentage
 """
 
+import numpy as np
 import pandas as pd
 
 
-def calculate_metrics(traffic_data: pd.DataFrame, signal_data: pd.DataFrame) -> dict:
+# ============================================================
+# DEFAULT PARAMETERS
+# ============================================================
+
+DEFAULT_CAPACITY = 400
+
+# Approximate fuel consumption used for simulation estimation
+FUEL_IDLE_RATE = 0.08
+
+# kg CO2 produced per litre of fuel
+CO2_PER_LITRE = 2.31
+
+
+# ============================================================
+# SAFE COLUMN HELPERS
+# ============================================================
+
+def _get_column(
+    df: pd.DataFrame,
+    column: str,
+    default=0
+):
     """
-    Calculate estimated simulation metrics for optimized/emergency traffic signal timing.
+    Safely return a DataFrame column.
 
-    Formulas & Estimates:
-        1. Average Waiting Time (s): Mean of estimated_waiting_time across intersections.
-        2. Total Queue Length (vehicles): Sum of queue lengths reduced by additional green light duration.
-        3. Throughput (veh/min): Estimated cleared vehicles per minute based on active green times and road capacity.
-        4. Fuel Consumption (L): Idling fuel consumption = Total Queue * Wait Time * 0.00033 L/sec.
-        5. CO2 Emissions (kg): Carbon emissions = Fuel Consumption * 2.31 kg CO2/L.
-
-    Parameters:
-        traffic_data (pd.DataFrame): Input traffic simulation DataFrame.
-        signal_data (pd.DataFrame): Optimized or emergency signal DataFrame.
-
-    Returns:
-        dict: Performance KPI metrics dictionary.
+    If the column does not exist, return a default Series.
     """
-    merged = pd.merge(traffic_data, signal_data, on="intersection_id", how="inner")
 
-    est_wait_times = []
-    eff_queues = []
-    throughputs = []
+    if column in df.columns:
+        return pd.to_numeric(
+            df[column],
+            errors="coerce"
+        ).fillna(default)
 
-    for _, row in merged.iterrows():
-        capacity = float(row.get("road_capacity", 400.0))
-        density = float(row.get("vehicle_density", 0.3))
-        queue = float(row.get("queue_length", 10.0))
-        wait = float(row.get("waiting_time", 25.0))
+    return pd.Series(
+        [default] * len(df),
+        index=df.index
+    )
 
-        opt_green = float(row.get("optimized_green_time", 45.0))
-        orig_green = float(row.get("original_green_time", 30.0))
-        signal_status = str(row.get("signal_status", "NORMAL"))
-        decision = str(row.get("decision", "KEEP"))
 
-        # Calculate estimated waiting time
-        if "estimated_waiting_time" in row:
-            est_wait = float(row["estimated_waiting_time"])
-        elif decision == "INCREASE_GREEN" or signal_status == "GREEN":
-            est_wait = max(5.0, wait * 0.55)
+def _get_bool_column(
+    df: pd.DataFrame,
+    column: str
+):
+    """
+    Safely read boolean columns.
+    """
+
+    if column not in df.columns:
+
+        return pd.Series(
+            [False] * len(df),
+            index=df.index
+        )
+
+    return (
+        df[column]
+        .astype(str)
+        .str.lower()
+        .isin(
+            [
+                "true",
+                "1",
+                "yes",
+                "active"
+            ]
+        )
+    )
+
+
+# ============================================================
+# TOTAL TRAFFIC
+# ============================================================
+
+def calculate_total_traffic(
+    traffic_data: pd.DataFrame
+) -> float:
+
+    north = _get_column(
+        traffic_data,
+        "north_traffic"
+    )
+
+    south = _get_column(
+        traffic_data,
+        "south_traffic"
+    )
+
+    east = _get_column(
+        traffic_data,
+        "east_traffic"
+    )
+
+    west = _get_column(
+        traffic_data,
+        "west_traffic"
+    )
+
+    return float(
+        (
+            north
+            + south
+            + east
+            + west
+        ).sum()
+    )
+
+
+# ============================================================
+# QUEUE LENGTH
+# ============================================================
+
+def calculate_total_queue(
+    traffic_data: pd.DataFrame
+) -> float:
+
+    queue = _get_column(
+        traffic_data,
+        "queue_length"
+    )
+
+    return float(
+        queue.sum()
+    )
+
+
+# ============================================================
+# AVERAGE WAITING TIME
+# ============================================================
+
+def calculate_average_waiting_time(
+    traffic_data: pd.DataFrame
+) -> float:
+
+    waiting = _get_column(
+        traffic_data,
+        "waiting_time"
+    )
+
+    if len(waiting) == 0:
+        return 0.0
+
+    return float(
+        waiting.mean()
+    )
+
+
+# ============================================================
+# AVERAGE DENSITY
+# ============================================================
+
+def calculate_average_density(
+    traffic_data: pd.DataFrame
+) -> float:
+
+    density = _get_column(
+        traffic_data,
+        "vehicle_density"
+    )
+
+    if len(density) == 0:
+        return 0.0
+
+    return float(
+        density.mean()
+    )
+
+
+# ============================================================
+# CONGESTION LEVEL
+# ============================================================
+
+def calculate_congestion_level(
+    density: float
+) -> str:
+
+    if density < 0.35:
+
+        return "LOW"
+
+    elif density < 0.65:
+
+        return "MEDIUM"
+
+    elif density < 0.85:
+
+        return "HIGH"
+
+    return "CRITICAL"
+
+
+# ============================================================
+# THROUGHPUT
+# ============================================================
+
+def calculate_throughput(
+    traffic_data: pd.DataFrame
+) -> float:
+
+    capacity = _get_column(
+        traffic_data,
+        "road_capacity",
+        DEFAULT_CAPACITY
+    )
+
+    density = _get_column(
+        traffic_data,
+        "vehicle_density"
+    )
+
+    # Effective available capacity
+    throughput = (
+        capacity
+        *
+        (
+            1.0
+            -
+            density
+        )
+    )
+
+    throughput = throughput.clip(
+        lower=0
+    )
+
+    return float(
+        throughput.sum()
+    )
+
+
+# ============================================================
+# ESTIMATED FUEL CONSUMPTION
+# ============================================================
+
+def calculate_fuel_consumption(
+    traffic_data: pd.DataFrame
+) -> float:
+
+    queue = _get_column(
+        traffic_data,
+        "queue_length"
+    )
+
+    waiting = _get_column(
+        traffic_data,
+        "waiting_time"
+    )
+
+    # Fuel consumed while vehicles are
+    # stopped / delayed.
+    #
+    # This is a simulation estimate, not
+    # a real vehicle fuel measurement.
+
+    idle_fuel = (
+        queue
+        *
+        FUEL_IDLE_RATE
+    )
+
+    delay_fuel = (
+        waiting
+        *
+        0.01
+    )
+
+    total_fuel = (
+        idle_fuel
+        +
+        delay_fuel
+    ).sum()
+
+    return float(
+        total_fuel
+    )
+
+
+# ============================================================
+# CO2 EMISSION
+# ============================================================
+
+def calculate_co2_emissions(
+    fuel_litres: float
+) -> float:
+
+    return float(
+        fuel_litres
+        *
+        CO2_PER_LITRE
+    )
+
+
+# ============================================================
+# EMERGENCY WAITING TIME
+# ============================================================
+
+def calculate_emergency_waiting_time(
+    traffic_data: pd.DataFrame
+) -> float:
+
+    emergency_route = _get_bool_column(
+        traffic_data,
+        "is_emergency_route"
+    )
+
+    if not emergency_route.any():
+
+        return 0.0
+
+    waiting = _get_column(
+        traffic_data,
+        "waiting_time"
+    )
+
+    selected = waiting[
+        emergency_route
+    ]
+
+    if len(selected) == 0:
+
+        return 0.0
+
+    return float(
+        selected.mean()
+    )
+
+
+# ============================================================
+# EMERGENCY RESPONSE DELAY
+# ============================================================
+
+def calculate_emergency_response_delay(
+    traffic_data: pd.DataFrame
+) -> float:
+
+    """
+    Estimates emergency response delay.
+
+    If emergency-specific waiting data exists,
+    it is used.
+
+    Otherwise the emergency corridor waiting
+    time is used as the simulation estimate.
+    """
+
+    if (
+        "emergency_waiting_time"
+        in traffic_data.columns
+    ):
+
+        values = _get_column(
+            traffic_data,
+            "emergency_waiting_time"
+        )
+
+        return float(
+            values.sum()
+        )
+
+    return calculate_emergency_waiting_time(
+        traffic_data
+    )
+
+
+# ============================================================
+# FULL PERFORMANCE METRICS
+# ============================================================
+
+def calculate_metrics(
+    traffic_data: pd.DataFrame
+) -> dict:
+
+    """
+    Calculate all performance metrics.
+    """
+
+    total_traffic = (
+        calculate_total_traffic(
+            traffic_data
+        )
+    )
+
+    total_queue = (
+        calculate_total_queue(
+            traffic_data
+        )
+    )
+
+    average_waiting = (
+        calculate_average_waiting_time(
+            traffic_data
+        )
+    )
+
+    average_density = (
+        calculate_average_density(
+            traffic_data
+        )
+    )
+
+    congestion = (
+        calculate_congestion_level(
+            average_density
+        )
+    )
+
+    throughput = (
+        calculate_throughput(
+            traffic_data
+        )
+    )
+
+    fuel = (
+        calculate_fuel_consumption(
+            traffic_data
+        )
+    )
+
+    co2 = (
+        calculate_co2_emissions(
+            fuel
+        )
+    )
+
+    emergency_waiting = (
+        calculate_emergency_waiting_time(
+            traffic_data
+        )
+    )
+
+    emergency_delay = (
+        calculate_emergency_response_delay(
+            traffic_data
+        )
+    )
+
+    return {
+
+        "total_traffic":
+            round(
+                total_traffic,
+                2
+            ),
+
+        "total_queue_length":
+            round(
+                total_queue,
+                2
+            ),
+
+        "average_waiting_time":
+            round(
+                average_waiting,
+                2
+            ),
+
+        "average_density":
+            round(
+                average_density,
+                4
+            ),
+
+        "congestion_level":
+            congestion,
+
+        "estimated_throughput":
+            round(
+                throughput,
+                2
+            ),
+
+        "estimated_fuel_litres":
+            round(
+                fuel,
+                2
+            ),
+
+        "estimated_co2_kg":
+            round(
+                co2,
+                2
+            ),
+
+        "emergency_corridor_waiting_time":
+            round(
+                emergency_waiting,
+                2
+            ),
+
+        "emergency_response_delay":
+            round(
+                emergency_delay,
+                2
+            )
+    }
+
+
+# ============================================================
+# BEFORE VS AFTER COMPARISON
+# ============================================================
+
+def compare_metrics(
+    before_data: pd.DataFrame,
+    after_data: pd.DataFrame
+) -> dict:
+
+    """
+    Compare traffic performance before and after
+    optimization.
+
+    Positive improvement means:
+        - Queue decreased
+        - Waiting time decreased
+        - Density decreased
+        - Fuel decreased
+        - CO2 decreased
+
+    For throughput:
+        increase is considered improvement.
+    """
+
+    before = calculate_metrics(
+        before_data
+    )
+
+    after = calculate_metrics(
+        after_data
+    )
+
+    comparison = {}
+
+    # --------------------------------------------------------
+    # LOWER IS BETTER
+    # --------------------------------------------------------
+
+    lower_is_better = [
+
+        "total_queue_length",
+
+        "average_waiting_time",
+
+        "average_density",
+
+        "estimated_fuel_litres",
+
+        "estimated_co2_kg",
+
+        "emergency_corridor_waiting_time",
+
+        "emergency_response_delay"
+    ]
+
+    for metric in lower_is_better:
+
+        old = float(
+            before[metric]
+        )
+
+        new = float(
+            after[metric]
+        )
+
+        if abs(old) < 1e-9:
+
+            improvement = 0.0
+
         else:
-            est_wait = wait
 
-        # Calculate effective queue reduction from extra green duration
-        extra_green = max(0.0, opt_green - orig_green)
-        queue_cleared_extra = extra_green * 0.4
-        eff_queue = max(0.0, queue - queue_cleared_extra)
+            improvement = (
+                (old - new)
+                /
+                abs(old)
+                *
+                100
+            )
 
-        # Throughput (vehicles cleared per minute)
-        # Base flow rate scaled by green ratio (opt_green / 60)
-        throughput_val = (capacity * density * (opt_green / 60.0)) / 4.0  # Normalized per minute per junction
+        comparison[metric] = {
 
-        est_wait_times.append(est_wait)
-        eff_queues.append(eff_queue)
-        throughputs.append(throughput_val)
+            "before":
+                round(old, 2),
 
-    avg_wait = float(sum(est_wait_times) / len(est_wait_times)) if est_wait_times else 0.0
-    total_queue = float(sum(eff_queues))
-    total_throughput = float(sum(throughputs))
+            "after":
+                round(new, 2),
 
-    # Fuel consumption formula: idling burn rate ~ 0.00033 L/sec per waiting vehicle
-    # Total idling vehicle-seconds = sum(eff_queue * est_wait)
-    idle_vehicle_seconds = sum(q * w for q, w in zip(eff_queues, est_wait_times))
-    fuel_consumption = idle_vehicle_seconds * 0.00033  # Liters
+            "change":
+                round(
+                    new - old,
+                    2
+                ),
 
-    # CO2 emissions: 2.31 kg CO2 per Liter of gasoline burned
-    co2_emissions = fuel_consumption * 2.31  # kg CO2
+            "improvement_percent":
+                round(
+                    improvement,
+                    2
+                )
+        }
 
-    return {
-        "average_waiting_time": round(avg_wait, 2),
-        "total_queue_length": round(total_queue, 1),
-        "throughput": round(total_throughput, 1),
-        "fuel_consumption": round(fuel_consumption, 2),
-        "co2_emissions": round(co2_emissions, 2),
+    # --------------------------------------------------------
+    # HIGHER IS BETTER
+    # --------------------------------------------------------
+
+    old = float(
+        before[
+            "estimated_throughput"
+        ]
+    )
+
+    new = float(
+        after[
+            "estimated_throughput"
+        ]
+    )
+
+    if abs(old) < 1e-9:
+
+        improvement = 0.0
+
+    else:
+
+        improvement = (
+            (new - old)
+            /
+            abs(old)
+            *
+            100
+        )
+
+    comparison[
+        "estimated_throughput"
+    ] = {
+
+        "before":
+            round(
+                old,
+                2
+            ),
+
+        "after":
+            round(
+                new,
+                2
+            ),
+
+        "change":
+            round(
+                new - old,
+                2
+            ),
+
+        "improvement_percent":
+            round(
+                improvement,
+                2
+            )
     }
 
+    # --------------------------------------------------------
+    # CONGESTION
+    # --------------------------------------------------------
 
-def calculate_classical_baseline(traffic_data: pd.DataFrame) -> dict:
-    """
-    Calculate performance metrics for a classical fixed-time signal system.
-    Baseline green duration is derived from current signal phase timing (45s for GREEN, 30s for RED).
+    comparison[
+        "congestion_level"
+    ] = {
 
-    Parameters:
-        traffic_data (pd.DataFrame): Input traffic simulation DataFrame.
+        "before":
+            before[
+                "congestion_level"
+            ],
 
-    Returns:
-        dict: Baseline performance KPI metrics dictionary.
-    """
-    wait_times = []
-    queues = []
-    throughputs = []
-
-    for _, row in traffic_data.iterrows():
-        capacity = float(row.get("road_capacity", 400.0))
-        density = float(row.get("vehicle_density", 0.3))
-        queue = float(row.get("queue_length", 10.0))
-        wait = float(row.get("waiting_time", 25.0))
-        current_signal = str(row.get("current_signal", "NS_GREEN"))
-
-        # Baseline green time matching standard signal phase
-        orig_green = 45.0 if "GREEN" in current_signal.upper() else 30.0
-
-        # Fixed time throughput
-        tp = (capacity * density * (orig_green / 60.0)) / 4.0
-
-        wait_times.append(wait)
-        queues.append(queue)
-        throughputs.append(tp)
-
-    avg_wait = float(sum(wait_times) / len(wait_times)) if wait_times else 0.0
-    total_queue = float(sum(queues))
-    total_throughput = float(sum(throughputs))
-
-    idle_vehicle_seconds = sum(q * w for q, w in zip(queues, wait_times))
-    fuel_consumption = idle_vehicle_seconds * 0.00033
-    co2_emissions = fuel_consumption * 2.31
-
-    return {
-        "average_waiting_time": round(avg_wait, 2),
-        "total_queue_length": round(total_queue, 1),
-        "throughput": round(total_throughput, 1),
-        "fuel_consumption": round(fuel_consumption, 2),
-        "co2_emissions": round(co2_emissions, 2),
+        "after":
+            after[
+                "congestion_level"
+            ]
     }
 
+    return comparison
 
-def compare_performance(classical_metrics: dict, optimized_metrics: dict) -> dict:
+
+# ============================================================
+# INTERSECTION-LEVEL METRICS
+# ============================================================
+
+def intersection_metrics(
+    traffic_data: pd.DataFrame
+) -> pd.DataFrame:
+
     """
-    Compare classical baseline metrics against optimized signal metrics.
-
-    Parameters:
-        classical_metrics (dict): KPI dict from calculate_classical_baseline().
-        optimized_metrics (dict): KPI dict from calculate_metrics().
-
-    Returns:
-        dict: Performance comparison containing:
-            - 'classical': baseline values
-            - 'optimized': optimized values
-            - 'percentage_change': percentage change for each metric
+    Generate performance metrics for every intersection.
     """
-    pct_change = {}
 
-    # Helper function for percentage change calculation
-    def calc_pct(c_val, o_val, lower_is_better=True):
-        if c_val == 0:
-            return 0.0
-        diff = ((c_val - o_val) / c_val) * 100.0 if lower_is_better else ((o_val - c_val) / c_val) * 100.0
-        return round(diff, 2)
+    if traffic_data.empty:
 
-    pct_change["waiting_time_reduction_pct"] = calc_pct(
-        classical_metrics["average_waiting_time"], optimized_metrics["average_waiting_time"], lower_is_better=True
-    )
-    pct_change["queue_reduction_pct"] = calc_pct(
-        classical_metrics["total_queue_length"], optimized_metrics["total_queue_length"], lower_is_better=True
-    )
-    pct_change["throughput_improvement_pct"] = calc_pct(
-        classical_metrics["throughput"], optimized_metrics["throughput"], lower_is_better=False
-    )
-    pct_change["fuel_savings_pct"] = calc_pct(
-        classical_metrics["fuel_consumption"], optimized_metrics["fuel_consumption"], lower_is_better=True
-    )
-    pct_change["co2_savings_pct"] = calc_pct(
-        classical_metrics["co2_emissions"], optimized_metrics["co2_emissions"], lower_is_better=True
+        return pd.DataFrame()
+
+    data = traffic_data.copy()
+
+    density = _get_column(
+        data,
+        "vehicle_density"
     )
 
-    return {
-        "classical": classical_metrics,
-        "optimized": optimized_metrics,
-        "percentage_change": pct_change,
-    }
+    queue = _get_column(
+        data,
+        "queue_length"
+    )
 
+    waiting = _get_column(
+        data,
+        "waiting_time"
+    )
+
+    capacity = _get_column(
+        data,
+        "road_capacity",
+        DEFAULT_CAPACITY
+    )
+
+    result = pd.DataFrame()
+
+    result[
+        "intersection_id"
+    ] = data[
+        "intersection_id"
+    ].astype(str)
+
+    result[
+        "queue_length"
+    ] = queue.round(2)
+
+    result[
+        "waiting_time"
+    ] = waiting.round(2)
+
+    result[
+        "density"
+    ] = density.round(4)
+
+    result[
+        "throughput"
+    ] = (
+        capacity
+        *
+        (
+            1
+            -
+            density
+        )
+    ).clip(
+        lower=0
+    ).round(2)
+
+    result[
+        "congestion_level"
+    ] = density.apply(
+        calculate_congestion_level
+    )
+
+    result[
+        "emergency_route"
+    ] = _get_bool_column(
+        data,
+        "is_emergency_route"
+    )
+
+    return result
+
+
+# ============================================================
+# PRINT REPORT
+# ============================================================
+
+def print_metrics_report(
+    traffic_data: pd.DataFrame,
+    title="Traffic Performance"
+):
+
+    metrics = calculate_metrics(
+        traffic_data
+    )
+
+    print()
+    print("=" * 60)
+    print(title)
+    print("=" * 60)
+
+    for key, value in metrics.items():
+
+        print(
+            f"{key:40}: {value}"
+        )
+
+    print("=" * 60)
+
+
+# ============================================================
+# TEST
+# ============================================================
 
 if __name__ == "__main__":
-    import sys
-    import os
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    from simulation.traffic_simulation import generate_traffic
-    from optimization.qaoa import optimize_signals
 
-    t_data = generate_traffic("Heavy Congestion")
-    opt_signals = optimize_signals(t_data)
+    from simulation.traffic_simulation import (
+        generate_traffic
+    )
 
-    class_m = calculate_classical_baseline(t_data)
-    opt_m = calculate_metrics(t_data, opt_signals)
-    comp = compare_performance(class_m, opt_m)
+    scenarios = [
 
-    print("=== Classical Baseline Metrics ===")
-    print(class_m)
-    print("\n=== Optimized Signal Metrics ===")
-    print(opt_m)
-    print("\n=== Performance Comparison ===")
-    print(comp["percentage_change"])
+        "Normal Traffic",
+
+        "Heavy Congestion",
+
+        "Accident / Road Closure",
+
+        "Emergency Vehicle"
+    ]
+
+    for scenario in scenarios:
+
+        print()
+
+        print(
+            f"SCENARIO: {scenario}"
+        )
+
+        data = generate_traffic(
+            scenario
+        )
+
+        print_metrics_report(
+            data,
+            title=scenario
+        )

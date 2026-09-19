@@ -1,92 +1,414 @@
 """
-Module: Emergency Corridor Optimization
-Assigned to: Team Member 3 (Emergency Response Lead)
-Description: Dynamically creates green light corridors for emergency vehicles navigating through traffic networks.
+Emergency Corridor Management
+
+Purpose:
+    Detect and manage an emergency vehicle corridor
+    across the traffic network.
+
+Network:
+    J1 -> J2 -> J4
+
+The module does NOT perform QAOA.
+It creates emergency constraints/priority information
+which can be used together with the QAOA result.
 """
 
+from dataclasses import dataclass
+from typing import List, Optional
 import pandas as pd
 
 
-def create_emergency_corridor(route: list, signal_data: pd.DataFrame) -> pd.DataFrame:
-    """
-    Create a temporary green corridor for an emergency vehicle along a specified route.
+# ============================================================
+# DEFAULT EMERGENCY ROUTE
+# ============================================================
 
-    Parameters:
-        route (list): List of intersection IDs along the emergency corridor (e.g., ["J1", "J2", "J3", "J5"]).
-        signal_data (pd.DataFrame): Optimized signal DataFrame produced by optimize_signals().
-
-    Returns:
-        pd.DataFrame: Modified DataFrame with green corridor priorities applied:
-            - intersection_id
-            - signal_status ("GREEN" for route nodes, "NORMAL" for non-route)
-            - optimized_green_time (60s priority for route nodes, preserved for non-route)
-            - emergency_priority (True for route nodes, False for non-route)
-    """
-    df = signal_data.copy()
-    route_set = set(route)
-
-    signal_status_list = []
-    opt_green_list = []
-    emergency_priority_list = []
-
-    for _, row in df.iterrows():
-        inter_id = row["intersection_id"]
-        orig_green = int(row.get("optimized_green_time", 45))
-
-        if inter_id in route_set:
-            signal_status_list.append("GREEN")
-            # Grant priority green duration (at least 60 seconds)
-            opt_green_list.append(max(60, orig_green))
-            emergency_priority_list.append(True)
-        else:
-            signal_status_list.append("NORMAL")
-            opt_green_list.append(orig_green)
-            emergency_priority_list.append(False)
-
-    df["signal_status"] = signal_status_list
-    df["optimized_green_time"] = opt_green_list
-    df["emergency_priority"] = emergency_priority_list
-
-    # Ensure required schema columns appear first
-    req_cols = ["intersection_id", "signal_status", "optimized_green_time", "emergency_priority"]
-    other_cols = [c for c in df.columns if c not in req_cols]
-    return df[req_cols + other_cols]
+DEFAULT_EMERGENCY_ROUTE = [
+    "J1",
+    "J2",
+    "J4"
+]
 
 
-def restore_normal_signals(signal_data: pd.DataFrame) -> pd.DataFrame:
-    """
-    Remove emergency priority flags and return normal optimized signal configuration.
+# ============================================================
+# EMERGENCY VEHICLE
+# ============================================================
 
-    Parameters:
-        signal_data (pd.DataFrame): Emergency or modified signal DataFrame.
+@dataclass
+class EmergencyVehicle:
 
-    Returns:
-        pd.DataFrame: Cleaned DataFrame with normal signal statuses and emergency_priority=False.
-    """
-    df = signal_data.copy()
-    df["signal_status"] = "NORMAL"
-    df["emergency_priority"] = False
+    vehicle_id: str = "EV-01"
 
-    req_cols = ["intersection_id", "signal_status", "optimized_green_time", "emergency_priority"]
-    other_cols = [c for c in df.columns if c not in req_cols]
-    return df[req_cols + other_cols]
+    route: Optional[List[str]] = None
+
+    current_index: int = 0
+
+    active: bool = True
+
+    # Estimated speed in km/h
+    speed_kmh: float = 40.0
+
+    def __post_init__(self):
+
+        if self.route is None:
+            self.route = DEFAULT_EMERGENCY_ROUTE.copy()
+
+    # --------------------------------------------------------
+    # CURRENT INTERSECTION
+    # --------------------------------------------------------
+
+    @property
+    def current_intersection(self):
+
+        if not self.active:
+            return None
+
+        if self.current_index >= len(self.route):
+            return None
+
+        return self.route[
+            self.current_index
+        ]
+
+    # --------------------------------------------------------
+    # NEXT INTERSECTION
+    # --------------------------------------------------------
+
+    @property
+    def next_intersection(self):
+
+        next_index = self.current_index + 1
+
+        if next_index >= len(self.route):
+            return None
+
+        return self.route[
+            next_index
+        ]
+
+    # --------------------------------------------------------
+    # COMPLETED?
+    # --------------------------------------------------------
+
+    @property
+    def completed(self):
+
+        return (
+            not self.active
+            and
+            self.current_index >= len(self.route)
+        )
+
+    # --------------------------------------------------------
+    # MOVE VEHICLE
+    # --------------------------------------------------------
+
+    def advance(self):
+
+        if not self.active:
+            return self.status()
+
+        self.current_index += 1
+
+        if self.current_index >= len(self.route):
+
+            self.active = False
+
+        return self.status()
+
+    # --------------------------------------------------------
+    # STATUS
+    # --------------------------------------------------------
+
+    def status(self):
+
+        return {
+            "vehicle_id": self.vehicle_id,
+            "active": self.active,
+            "current_intersection":
+                self.current_intersection,
+            "next_intersection":
+                self.next_intersection,
+            "route":
+                self.route,
+            "current_index":
+                self.current_index
+        }
 
 
-if __name__ == "__main__":
-    import sys
-    import os
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    from simulation.traffic_simulation import generate_traffic
-    from optimization.qaoa import optimize_signals
+# ============================================================
+# EMERGENCY CORRIDOR
+# ============================================================
 
-    t_data = generate_traffic("Emergency Vehicle")
-    opt_signals = optimize_signals(t_data)
-    route = ["J1", "J2", "J4"]
+class EmergencyCorridor:
 
-    print("=== Emergency Green Corridor ===")
-    emerg_signals = create_emergency_corridor(route, opt_signals)
-    print(emerg_signals.to_string(index=False))
+    def __init__(
+        self,
+        route=None
+    ):
 
-    print("\n=== Restored Normal Signals ===")
-    restored = restore_normal_signals(emerg_signals)
-    print(restored.to_string(index=False))
+        self.route = (
+            route.copy()
+            if route
+            else DEFAULT_EMERGENCY_ROUTE.copy()
+        )
+
+    # --------------------------------------------------------
+    # CHECK INTERSECTION
+    # --------------------------------------------------------
+
+    def is_in_corridor(
+        self,
+        intersection_id
+    ):
+
+        return (
+            intersection_id
+            in self.route
+        )
+
+    # --------------------------------------------------------
+    # GET PRIORITY LEVEL
+    # --------------------------------------------------------
+
+    def get_priority(
+        self,
+        intersection_id,
+        emergency_vehicle
+    ):
+
+        if not emergency_vehicle.active:
+
+            return "NORMAL"
+
+        current = (
+            emergency_vehicle.current_intersection
+        )
+
+        next_intersection = (
+            emergency_vehicle.next_intersection
+        )
+
+        if intersection_id == current:
+
+            return "ACTIVE"
+
+        if intersection_id == next_intersection:
+
+            return "PREPARE"
+
+        if intersection_id in self.route:
+
+            return "CORRIDOR"
+
+        return "NORMAL"
+
+    # --------------------------------------------------------
+    # MARK TRAFFIC DATA
+    # --------------------------------------------------------
+
+    def mark_traffic_data(
+        self,
+        traffic_data: pd.DataFrame,
+        emergency_vehicle: EmergencyVehicle
+    ):
+
+        data = traffic_data.copy()
+
+        # Make sure columns exist
+
+        data["emergency_active"] = (
+            emergency_vehicle.active
+        )
+
+        data["is_emergency_route"] = False
+
+        data["emergency_priority"] = "NORMAL"
+
+        data["emergency_current"] = False
+
+        data["emergency_next"] = False
+
+        for index, row in data.iterrows():
+
+            intersection = str(
+                row["intersection_id"]
+            )
+
+            priority = self.get_priority(
+                intersection,
+                emergency_vehicle
+            )
+
+            data.loc[
+                index,
+                "is_emergency_route"
+            ] = (
+                intersection
+                in self.route
+            )
+
+            data.loc[
+                index,
+                "emergency_priority"
+            ] = priority
+
+            data.loc[
+                index,
+                "emergency_current"
+            ] = (
+                priority == "ACTIVE"
+            )
+
+            data.loc[
+                index,
+                "emergency_next"
+            ] = (
+                priority == "PREPARE"
+            )
+
+        return data
+
+    # --------------------------------------------------------
+    # CREATE SIGNAL OVERRIDE
+    # --------------------------------------------------------
+
+    def create_signal_override(
+        self,
+        traffic_data: pd.DataFrame,
+        emergency_vehicle: EmergencyVehicle
+    ):
+
+        overrides = {}
+
+        current = (
+            emergency_vehicle.current_intersection
+        )
+
+        next_intersection = (
+            emergency_vehicle.next_intersection
+        )
+
+        for _, row in traffic_data.iterrows():
+
+            intersection = str(
+                row["intersection_id"]
+            )
+
+            # --------------------------------------------
+            # CURRENT EMERGENCY INTERSECTION
+            # --------------------------------------------
+
+            if intersection == current:
+
+                overrides[intersection] = {
+
+                    "signal":
+                        "NS_GREEN",
+
+                    "green_time":
+                        60,
+
+                    "priority":
+                        "ACTIVE",
+
+                    "reason":
+                        "Emergency vehicle approaching"
+                }
+
+            # --------------------------------------------
+            # NEXT INTERSECTION
+            # --------------------------------------------
+
+            elif intersection == next_intersection:
+
+                overrides[intersection] = {
+
+                    "signal":
+                        "NS_GREEN",
+
+                    "green_time":
+                        50,
+
+                    "priority":
+                        "PREPARE",
+
+                    "reason":
+                        "Prepare emergency corridor"
+                }
+
+            # --------------------------------------------
+            # OTHER CORRIDOR
+            # --------------------------------------------
+
+            elif intersection in self.route:
+
+                overrides[intersection] = {
+
+                    "signal":
+                        "NS_GREEN",
+
+                    "green_time":
+                        40,
+
+                    "priority":
+                        "CORRIDOR",
+
+                    "reason":
+                        "Emergency route"
+                }
+
+            # --------------------------------------------
+            # NORMAL TRAFFIC
+            # --------------------------------------------
+
+            else:
+
+                overrides[intersection] = {
+
+                    "signal":
+                        str(
+                            row.get(
+                                "current_signal",
+                                "NS_GREEN"
+                            )
+                        ),
+
+                    "green_time":
+                        30,
+
+                    "priority":
+                        "NORMAL",
+
+                    "reason":
+                        "Normal traffic"
+                }
+
+        return overrides
+
+    # --------------------------------------------------------
+    # ADVANCE EMERGENCY VEHICLE
+    # --------------------------------------------------------
+
+    def advance(
+        self,
+        emergency_vehicle
+    ):
+
+        return emergency_vehicle.advance()
+
+    # --------------------------------------------------------
+    # END EMERGENCY
+    # --------------------------------------------------------
+
+    def finish(
+        self,
+        emergency_vehicle
+    ):
+
+        emergency_vehicle.active = False
+
+        emergency_vehicle.current_index = (
+            len(emergency_vehicle.route)
+        )
+
+        return emergency_vehicle.status()

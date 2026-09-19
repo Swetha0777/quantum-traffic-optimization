@@ -3,14 +3,27 @@ Module: Quantum Optimization - QAOA & Hybrid Solver
 Assigned to: Team Member 2 (Quantum Optimization Lead)
 Description: Solves the QUBO problem formulated in qubo.py using QAOA (or exact classical QUBO solver fallback)
              to optimize traffic signal timings across 6 intersections.
+
+Solver Metadata:
+    solver_used  : str  - "Qiskit QAOA" or "Classical Exact Fallback"
+    quantum_used : bool - True if Qiskit QAOA was used, False for classical
+    objective_value : float - Final objective value H(x*) = x*^T Q x*
 """
 
 import numpy as np
 import pandas as pd
 try:
-    from optimization.qubo import create_qubo
+    from optimization.qubo import create_qubo, calculate_qubo_cost
 except ModuleNotFoundError:
-    from qubo import create_qubo
+    from qubo import create_qubo, calculate_qubo_cost
+
+
+# Module-level solver metadata (updated after each solve)
+_solver_metadata = {
+    "solver_used": "Not yet solved",
+    "quantum_used": False,
+    "objective_value": 0.0,
+}
 
 
 def _solve_qubo_classical(Q: np.ndarray) -> np.ndarray:
@@ -18,6 +31,7 @@ def _solve_qubo_classical(Q: np.ndarray) -> np.ndarray:
     Solve small N=6 QUBO problem by evaluating all 2^6 = 64 binary state vectors.
     Finds the exact binary vector x* in {0, 1}^N that minimizes H(x) = x^T * Q * x.
     """
+    global _solver_metadata
     n = Q.shape[0]
     best_cost = float("inf")
     best_x = np.zeros(n, dtype=int)
@@ -30,20 +44,23 @@ def _solve_qubo_classical(Q: np.ndarray) -> np.ndarray:
             best_cost = cost
             best_x = x
 
+    _solver_metadata["solver_used"] = "Classical Exact Fallback"
+    _solver_metadata["quantum_used"] = False
+    _solver_metadata["objective_value"] = round(best_cost, 6)
+
     return best_x
 
 
 def _solve_qubo_qiskit(Q: np.ndarray) -> np.ndarray:
     """
     Attempt to solve QUBO using Qiskit / QAOA if installed in environment.
+    Supports Qiskit 1.x and 2.x APIs with graceful fallback.
     Falls back to classical exact matrix solver if Qiskit is not available.
     """
+    global _solver_metadata
     try:
         from qiskit_optimization import QuadraticProgram
         from qiskit_optimization.algorithms import MinimumEigenOptimizer
-        from qiskit_algorithms import QAOA
-        from qiskit_algorithms.optimizers import COBYLA
-        from qiskit_primitives import Sampler
 
         n = Q.shape[0]
         qp = QuadraticProgram()
@@ -53,22 +70,64 @@ def _solve_qubo_qiskit(Q: np.ndarray) -> np.ndarray:
         linear = {}
         quadratic = {}
         for i in range(n):
-            linear[f"x_{i}"] = Q[i, i]
+            linear[f"x_{i}"] = float(Q[i, i])
             for j in range(i + 1, n):
-                weight = Q[i, j] + Q[j, i]
-                if weight != 0:
+                weight = float(Q[i, j] + Q[j, i])
+                if abs(weight) > 1e-10:
                     quadratic[(f"x_{i}", f"x_{j}")] = weight
 
         qp.minimize(linear=linear, quadratic=quadratic)
 
-        qaoa = QAOA(sampler=Sampler(), optimizer=COBYLA(maxiter=100))
-        optimizer = MinimumEigenOptimizer(qaoa)
-        result = optimizer.solve(qp)
-        return np.array([int(result.x[i]) for i in range(n)], dtype=int)
+        # Try Qiskit 2.x primitives first, then 1.x
+        qaoa = None
+        try:
+            from qiskit.primitives import StatevectorSampler
+            from qiskit_algorithms import QAOA
+            from qiskit_algorithms.optimizers import COBYLA
+            qaoa = QAOA(sampler=StatevectorSampler(), optimizer=COBYLA(maxiter=100))
+        except (ImportError, Exception):
+            try:
+                from qiskit_algorithms import QAOA
+                from qiskit_algorithms.optimizers import COBYLA
+                from qiskit.primitives import Sampler
+                qaoa = QAOA(sampler=Sampler(), optimizer=COBYLA(maxiter=100))
+            except (ImportError, Exception):
+                pass
+
+        if qaoa is not None:
+            optimizer = MinimumEigenOptimizer(qaoa)
+            result = optimizer.solve(qp)
+            solution = np.array([int(result.x[i]) for i in range(n)], dtype=int)
+            obj_value = float(solution.T @ Q @ solution)
+
+            _solver_metadata["solver_used"] = "Qiskit QAOA"
+            _solver_metadata["quantum_used"] = True
+            _solver_metadata["objective_value"] = round(obj_value, 6)
+
+            return solution
+
+        # If QAOA failed to initialize, use classical
+        return _solve_qubo_classical(Q)
 
     except Exception:
         # Documented hybrid fallback solver
         return _solve_qubo_classical(Q)
+
+
+def get_solver_metadata() -> dict:
+    """
+    Get metadata about the last QUBO solve.
+
+    Returns
+    -------
+    dict
+        {
+            'solver_used': str,
+            'quantum_used': bool,
+            'objective_value': float
+        }
+    """
+    return _solver_metadata.copy()
 
 
 def optimize_signals(traffic_data: pd.DataFrame) -> pd.DataFrame:
@@ -86,6 +145,8 @@ def optimize_signals(traffic_data: pd.DataFrame) -> pd.DataFrame:
             - optimized_green_time
             - decision ("INCREASE_GREEN" or "KEEP")
             - estimated_waiting_time
+            - solver_used
+            - quantum_used
     """
     # 1. Generate QUBO representation
     qubo_info = create_qubo(traffic_data)
@@ -132,7 +193,14 @@ def optimize_signals(traffic_data: pd.DataFrame) -> pd.DataFrame:
             "estimated_waiting_time": float(estimated_waiting_time),
         })
 
-    return pd.DataFrame(output_rows)
+    result_df = pd.DataFrame(output_rows)
+
+    # Attach solver metadata as DataFrame attributes
+    result_df.attrs["solver_used"] = _solver_metadata["solver_used"]
+    result_df.attrs["quantum_used"] = _solver_metadata["quantum_used"]
+    result_df.attrs["objective_value"] = _solver_metadata["objective_value"]
+
+    return result_df
 
 
 if __name__ == "__main__":
