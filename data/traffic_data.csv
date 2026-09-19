@@ -1,0 +1,7 @@
+intersection_id,north_traffic,south_traffic,east_traffic,west_traffic,vehicle_density,queue_length,road_capacity,current_signal,waiting_time,emergency_active,is_emergency_route
+J1,21,35,33,28,0.292,6,400,EW_GREEN,20.5,False,False
+J2,24,21,30,39,0.285,8,400,EW_GREEN,21.8,False,False
+J3,30,22,36,29,0.292,6,400,NS_GREEN,23.9,False,False
+J4,35,32,28,36,0.328,6,400,NS_GREEN,13.4,False,False
+J5,21,31,37,21,0.275,9,400,EW_GREEN,19.5,False,False
+J6,23,35,34,27,0.297,3,400,EW_GREEN,23.4,False,False
