@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Traffic Dense Vehicle Detection & Track Confirmation</title>
+
+  <!-- Google Fonts: Inter & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+
+  <!-- Custom Stylesheet -->
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+  <div class="app-container">
+    
+    <!-- HEADER BAR -->
+    <header class="header">
+      <div class="header-left">
+        <div class="logo-icon">🚦</div>
+        <div>
+          <h1 class="header-title">Dense Traffic Vehicle Detection & Track Counter</h1>
+          <p class="header-subtitle">Person 1 — High-Resolution YOLOv8 & ByteTrack Persistent Unique Tracking</p>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="status-badge status-disconnected" id="connectionStatus">
+          <span class="status-dot"></span>
+          <span id="statusText">Connecting...</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- CONTROL PANEL & DETECTION SETTINGS -->
+    <section class="control-panel glass-card">
+      <div class="control-group">
+        <label class="control-label">Input Source</label>
+        <div class="button-row">
+          <input type="file" id="videoFileInput" accept="video/mp4,video/avi,video/mov" style="display: none;" />
+          <button id="btnUploadVideo" class="btn btn-primary">
+            <span class="btn-icon">📁</span> Upload MP4 Video
+          </button>
+          <button id="btnStartCamera" class="btn btn-success">
+            <span class="btn-icon">📹</span> Start Laptop Camera
+          </button>
+          <button id="btnStopStream" class="btn btn-danger">
+            <span class="btn-icon">⏹️</span> Stop Stream
+          </button>
+          <button id="btnResetCounters" class="btn btn-secondary">
+            <span class="btn-icon">🔄</span> Reset Counters
+          </button>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <!-- Confidence Threshold Slider -->
+        <div class="setting-item">
+          <div class="setting-header">
+            <span>Confidence Threshold</span>
+            <span id="confThreshVal" class="setting-val">0.20</span>
+          </div>
+          <input type="range" id="confThreshSlider" min="10" max="80" value="20" step="5" />
+        </div>
+
+        <!-- Inference Resolution (imgsz) Buttons -->
+        <div class="setting-item">
+          <div class="setting-header">
+            <span>Inference Resolution</span>
+            <span id="imgszVal" class="setting-val">960px</span>
+          </div>
+          <div class="segmented-control" id="imgszControl">
+            <button class="segment-btn" data-val="640">640</button>
+            <button class="segment-btn active" data-val="960">960</button>
+            <button class="segment-btn" data-val="1280">1280</button>
+          </div>
+        </div>
+
+        <!-- Confirmation Frames Selector -->
+        <div class="setting-item">
+          <div class="setting-header">
+            <span>Track Confirmation</span>
+            <span id="confirmFramesVal" class="setting-val">3 frames</span>
+          </div>
+          <div class="segmented-control" id="confirmControl">
+            <button class="segment-btn" data-val="2">2f</button>
+            <button class="segment-btn active" data-val="3">3f</button>
+            <button class="segment-btn" data-val="4">4f</button>
+            <button class="segment-btn" data-val="5">5f</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- MAIN DASHBOARD CONTENT GRID -->
+    <main class="dashboard-grid">
+
+      <!-- LEFT COLUMN: VIDEO VIEWPORT -->
+      <section class="viewport-card glass-card">
+        <div class="viewport-header">
+          <div class="viewport-title">
+            <span class="live-dot"></span> Live Processed Stream
+          </div>
+          <div class="viewport-meta">
+            <span id="sourceBadge" class="badge">No Source Selected</span>
+            <span id="videoFpsBadge" class="badge badge-mono">Video: -- FPS</span>
+            <span id="procFpsBadge" class="badge badge-mono badge-highlight">Proc: 0 FPS</span>
+          </div>
+        </div>
+
+        <div class="video-container">
+          <img id="videoStream" src="" alt="Traffic Stream Placeholder" class="stream-img" />
+          <div id="videoPlaceholder" class="video-placeholder">
+            <div class="placeholder-icon">🚦</div>
+            <p class="placeholder-title">No Active Traffic Stream</p>
+            <p class="placeholder-sub">Upload an MP4 traffic video or click "Start Laptop Camera" to begin detection.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- RIGHT COLUMN: COUNTERS & TRAFFIC ANALYTICS -->
+      <aside class="sidebar-grid">
+
+        <!-- 1. ACTIVE VEHICLES IN FRAME CARDS -->
+        <div class="counters-section">
+          <div class="section-title">ACTIVE VEHICLES IN CURRENT SCENE</div>
+
+          <div class="counter-card counter-active-total glass-card">
+            <div class="counter-header">
+              <span class="counter-title">ACTIVE IN SCENE</span>
+              <span class="counter-icon">👀</span>
+            </div>
+            <div id="activeTotal" class="counter-number">0</div>
+            <div class="counter-footer">Currently visible in camera view</div>
+          </div>
+
+          <div class="category-grid">
+            <div class="counter-card card-car glass-card">
+              <div class="counter-label">CAR</div>
+              <div id="activeCar" class="counter-val">0</div>
+            </div>
+            <div class="counter-card card-motorcycle glass-card">
+              <div class="counter-label">MOTORCYCLE</div>
+              <div id="activeMotorcycle" class="counter-val">0</div>
+            </div>
+            <div class="counter-card card-bus glass-card">
+              <div class="counter-label">BUS</div>
+              <div id="activeBus" class="counter-val">0</div>
+            </div>
+            <div class="counter-card card-truck glass-card">
+              <div class="counter-label">TRUCK</div>
+              <div id="activeTruck" class="counter-val">0</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. TOTAL UNIQUE VEHICLES DETECTED CARDS -->
+        <div class="counters-section">
+          <div class="section-title">TOTAL UNIQUE VEHICLES DETECTED (SESSION)</div>
+
+          <div class="counter-card counter-unique-total glass-card">
+            <div class="counter-header">
+              <span class="counter-title">TOTAL UNIQUE DETECTED</span>
+              <span class="counter-icon">🏆</span>
+            </div>
+            <div id="uniqueTotal" class="counter-number">0</div>
+            <div class="counter-footer">Sum = Car + Motorcycle + Bus + Truck</div>
+          </div>
+
+          <div class="category-grid">
+            <div class="counter-card card-car glass-card">
+              <div class="counter-label">CAR</div>
+              <div id="uniqueCar" class="counter-val">0</div>
+            </div>
+            <div class="counter-card card-motorcycle glass-card">
+              <div class="counter-label">MOTORCYCLE</div>
+              <div id="uniqueMotorcycle" class="counter-val">0</div>
+            </div>
+            <div class="counter-card card-bus glass-card">
+              <div class="counter-label">BUS</div>
+              <div id="uniqueBus" class="counter-val">0</div>
+            </div>
+            <div class="counter-card card-truck glass-card">
+              <div class="counter-label">TRUCK</div>
+              <div id="uniqueTruck" class="counter-val">0</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- TRAFFIC ANALYTICS PANEL -->
+        <div class="analytics-card glass-card">
+          <h3 class="panel-title">Real-Time Traffic Analytics</h3>
+          
+          <div class="analytics-row">
+            <span class="analytics-label">Traffic State</span>
+            <span id="trafficStateBadge" class="state-badge state-low">LOW</span>
+          </div>
+
+          <div class="analytics-row">
+            <span class="analytics-label">Estimated Traffic Density</span>
+            <div class="density-bar-container">
+              <div id="densityBar" class="density-bar-fill" style="width: 0%;"></div>
+            </div>
+            <span id="densityVal" class="analytics-val">0%</span>
+          </div>
+
+          <div class="analytics-row">
+            <span class="analytics-label">Estimated Queue Length</span>
+            <span id="queueLengthVal" class="analytics-val">0 vehicles</span>
+          </div>
+
+          <div class="analytics-row">
+            <span class="analytics-label">Estimated Avg Waiting Time</span>
+            <span id="avgWaitingTimeVal" class="analytics-val">0.0 s</span>
+          </div>
+
+          <p class="disclaimer">* Metrics are estimated from active video tracking telemetry.</p>
+        </div>
+
+        <!-- SYSTEM EVENT LOG -->
+        <div class="log-card glass-card">
+          <h4 class="log-title">System Status & Events</h4>
+          <div id="eventLog" class="event-log-container">
+            <div class="log-entry">System ready. Select a video or webcam source.</div>
+          </div>
+        </div>
+
+      </aside>
+
+    </main>
+
+  </div>
+
+  <!-- JavaScript Client -->
+  <script src="/static/app.js"></script>
+</body>
+</html>
